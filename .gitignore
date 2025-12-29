@@ -1,0 +1,34 @@
+# Build outputs
+build/
+*.o
+*.elf
+*.iso
+*.bin
+*.img
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compilation database
+compile_commands.json
+
+# Limine bootloader (downloaded)
+limine/
+
+# Debug files
+*.log
+*.dump
+core
+
+# Backup files
+*.bak
+*.orig
+
+# Temporary files
+*.tmp
+tmp/

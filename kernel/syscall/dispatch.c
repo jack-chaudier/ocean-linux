@@ -1,0 +1,317 @@
+/*
+ * Ocean Kernel - System Call Dispatcher
+ *
+ * Routes system calls to their handlers and manages the syscall table.
+ */
+
+#include <ocean/syscall.h>
+#include <ocean/process.h>
+#include <ocean/sched.h>
+#include <ocean/ipc.h>
+#include <ocean/types.h>
+#include <ocean/defs.h>
+
+/* External functions */
+extern int kprintf(const char *fmt, ...);
+extern void *memset(void *s, int c, size_t n);
+
+/* Assembly entry point */
+extern void syscall_entry_simple(void);
+
+/* Per-CPU data for syscall handling */
+struct percpu_syscall {
+    u64 user_rsp;           /* Saved user RSP (offset 0) */
+    u64 kernel_rsp;         /* Kernel stack top (offset 8) */
+    u64 scratch;            /* Scratch space (offset 16) */
+};
+
+/* For now, single CPU only */
+static struct percpu_syscall percpu_data __aligned(16);
+
+/*
+ * System call handlers
+ */
+
+/* SYS_EXIT - Terminate the current process */
+static i64 sys_exit(i64 code)
+{
+    kprintf("[syscall] exit(%lld)\n", code);
+    process_exit((int)code);
+    /* Never returns */
+    return 0;
+}
+
+/* SYS_GETPID - Get process ID */
+static i64 sys_getpid(void)
+{
+    struct process *proc = get_current_process();
+    return proc ? proc->pid : -1;
+}
+
+/* SYS_GETPPID - Get parent process ID */
+static i64 sys_getppid(void)
+{
+    struct process *proc = get_current_process();
+    return proc ? proc->ppid : -1;
+}
+
+/* SYS_YIELD - Yield the CPU */
+static i64 sys_yield(void)
+{
+    sched_yield();
+    return 0;
+}
+
+/* SYS_DEBUG_PRINT - Debug print (for testing) */
+static i64 sys_debug_print(const char *msg, u64 len)
+{
+    /* TODO: Validate user pointer */
+    /* For now, just print directly (UNSAFE - for testing only) */
+    for (u64 i = 0; i < len && i < 256; i++) {
+        extern void serial_putc(char c);
+        serial_putc(msg[i]);
+    }
+    return (i64)len;
+}
+
+/* SYS_WRITE - Write to file descriptor (minimal implementation) */
+static i64 sys_write(int fd, const char *buf, u64 count)
+{
+    /* For now, only support stdout (fd 1) and stderr (fd 2) */
+    if (fd != 1 && fd != 2) {
+        return -1;  /* EBADF */
+    }
+
+    /* TODO: Validate user buffer pointer */
+    for (u64 i = 0; i < count; i++) {
+        extern void serial_putc(char c);
+        serial_putc(buf[i]);
+    }
+
+    return (i64)count;
+}
+
+/*
+ * IPC System Call Handlers
+ */
+
+/* SYS_IPC_SEND - Send a message to an endpoint */
+static i64 sys_ipc_send_impl(u32 ep_cap, u64 tag, u64 r1, u64 r2, u64 r3, u64 r4)
+{
+    u64 regs[IPC_FAST_REGS] = {r1, r2, r3, r4, 0, 0, 0, 0};
+    int result = ipc_send_fast(ep_cap, tag, regs);
+    return (i64)result;
+}
+
+/* SYS_IPC_RECV - Receive a message from an endpoint */
+static i64 sys_ipc_recv_impl(u32 ep_cap, u64 tag_ptr, u64 r1_ptr, u64 r2_ptr, u64 r3_ptr, u64 r4_ptr)
+{
+    u64 tag = 0;
+    u64 regs[IPC_FAST_REGS] = {0};
+
+    int result = ipc_recv_fast(ep_cap, &tag, regs);
+
+    /* Copy results back to user pointers (TODO: validate pointers) */
+    if (result == IPC_OK && tag_ptr) {
+        *(u64 *)tag_ptr = tag;
+        if (r1_ptr) *(u64 *)r1_ptr = regs[0];
+        if (r2_ptr) *(u64 *)r2_ptr = regs[1];
+        if (r3_ptr) *(u64 *)r3_ptr = regs[2];
+        if (r4_ptr) *(u64 *)r4_ptr = regs[3];
+    }
+
+    return (i64)result;
+}
+
+/* SYS_ENDPOINT_CREATE - Create a new endpoint */
+static i64 sys_endpoint_create_impl(u32 flags)
+{
+    struct process *proc = get_current_process();
+    if (!proc) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_endpoint *ep = endpoint_create(proc, flags);
+    if (!ep) {
+        return -IPC_ERR_INVALID;
+    }
+
+    return (i64)ep->id;
+}
+
+/* SYS_ENDPOINT_DESTROY - Destroy an endpoint */
+static i64 sys_endpoint_destroy_impl(u32 ep_id)
+{
+    struct ipc_endpoint *ep = endpoint_get(ep_id);
+    if (!ep) {
+        return -IPC_ERR_INVALID;
+    }
+
+    endpoint_destroy(ep);
+    return 0;
+}
+
+/*
+ * System call table
+ */
+static syscall_handler_t syscall_table[NR_SYSCALLS] = {
+    /* Process control */
+    [SYS_EXIT]          = (syscall_handler_t)sys_exit,
+    [SYS_GETPID]        = (syscall_handler_t)sys_getpid,
+    [SYS_GETPPID]       = (syscall_handler_t)sys_getppid,
+
+    /* Thread control */
+    [SYS_YIELD]         = (syscall_handler_t)sys_yield,
+
+    /* File operations */
+    [SYS_WRITE]         = (syscall_handler_t)sys_write,
+
+    /* IPC - Message passing */
+    [SYS_IPC_SEND]      = (syscall_handler_t)sys_ipc_send_impl,
+    [SYS_IPC_RECV]      = (syscall_handler_t)sys_ipc_recv_impl,
+
+    /* IPC - Endpoints */
+    [SYS_ENDPOINT_CREATE] = (syscall_handler_t)sys_endpoint_create_impl,
+    [SYS_ENDPOINT_DESTROY] = (syscall_handler_t)sys_endpoint_destroy_impl,
+
+    /* Debug */
+    [SYS_DEBUG_PRINT]   = (syscall_handler_t)sys_debug_print,
+};
+
+/*
+ * Syscall dispatcher - called from assembly with register frame
+ *
+ * frame points to saved registers on kernel stack:
+ *   r15, r14, r13, r12, r11, r10, r9, r8,
+ *   rbp, rdi, rsi, rdx, rcx, rbx, rax,
+ *   int_no, error_code,
+ *   rip, cs, rflags, rsp, ss
+ */
+i64 syscall_dispatch_frame(u64 nr, u64 *frame)
+{
+    /* Extract arguments from saved frame */
+    /* Frame layout (from entry.asm, bottom to top of stack):
+     *   [0] = r15, [1] = r14, ..., [6] = r9, [7] = r8
+     *   [8] = rbp, [9] = rdi, [10] = rsi, [11] = rdx
+     *   [12] = rcx, [13] = rbx, [14] = rax (syscall nr)
+     */
+    u64 arg1 = frame[9];   /* rdi */
+    u64 arg2 = frame[10];  /* rsi */
+    u64 arg3 = frame[11];  /* rdx */
+    u64 arg4 = frame[6];   /* r10 -> use r9 slot since r10 was moved? */
+                           /* Actually r10 is at [5] */
+    u64 arg5 = frame[7];   /* r8 */
+    u64 arg6 = frame[6];   /* r9 */
+
+    /* Fix: r10 is at index 5 (counting from r15=0) */
+    arg4 = frame[5];       /* r10 */
+    arg6 = frame[6];       /* r9 */
+
+    return syscall_dispatch(nr, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+/*
+ * Main syscall dispatcher
+ */
+i64 syscall_dispatch(u64 nr, u64 arg1, u64 arg2, u64 arg3,
+                     u64 arg4, u64 arg5, u64 arg6)
+{
+    /* Validate syscall number */
+    if (nr >= NR_SYSCALLS) {
+        kprintf("[syscall] Invalid syscall number: %llu\n", nr);
+        return -1;  /* ENOSYS */
+    }
+
+    /* Get handler */
+    syscall_handler_t handler = syscall_table[nr];
+    if (!handler) {
+        kprintf("[syscall] Unimplemented syscall: %llu\n", nr);
+        return -1;  /* ENOSYS */
+    }
+
+    /* Call handler */
+    return handler(arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+/*
+ * Initialize system call handling
+ */
+void syscall_init(void)
+{
+    kprintf("Initializing system calls...\n");
+
+    /* Set up per-CPU data */
+    memset(&percpu_data, 0, sizeof(percpu_data));
+
+    /* Allocate a kernel stack for syscall entry */
+    extern void *kmalloc(size_t size);
+    void *syscall_stack = kmalloc(8192);
+    if (!syscall_stack) {
+        kprintf("  Failed to allocate syscall stack!\n");
+        return;
+    }
+    percpu_data.kernel_rsp = (u64)syscall_stack + 8192 - 8;
+
+    kprintf("  Syscall stack at %p\n", syscall_stack);
+
+    /* Set up GS base to point to per-CPU data */
+    /* MSR_GS_BASE = 0xC0000101, MSR_KERNEL_GS_BASE = 0xC0000102 */
+    #define MSR_GS_BASE         0xC0000101
+    #define MSR_KERNEL_GS_BASE  0xC0000102
+
+    /* Set kernel GS base (swapped in by SWAPGS) */
+    wrmsr(MSR_KERNEL_GS_BASE, (u64)&percpu_data);
+    kprintf("  Kernel GS base set to %p\n", &percpu_data);
+
+    /* Enable SYSCALL/SYSRET in EFER */
+    u64 efer = rdmsr(MSR_EFER);
+    efer |= EFER_SCE;  /* Syscall enable */
+    wrmsr(MSR_EFER, efer);
+    kprintf("  EFER.SCE enabled\n");
+
+    /*
+     * Configure STAR MSR
+     *
+     * STAR layout:
+     *   [31:0]  = Reserved (or SYSCALL EIP for 32-bit, unused in 64-bit)
+     *   [47:32] = SYSCALL CS/SS base (kernel segments)
+     *   [63:48] = SYSRET CS/SS base (user segments)
+     *
+     * For SYSCALL: CS = STAR[47:32], SS = STAR[47:32] + 8
+     * For SYSRET:  CS = STAR[63:48] + 16 (64-bit), SS = STAR[63:48] + 8
+     *
+     * Our GDT:
+     *   0x08 = Kernel CS
+     *   0x10 = Kernel DS/SS
+     *   0x18 = User CS32
+     *   0x20 = User DS/SS
+     *   0x28 = User CS64
+     *
+     * So: SYSCALL base = 0x08 (kernel CS at 0x08, SS at 0x10)
+     *     SYSRET base  = 0x18 (SS at 0x18+8=0x20, CS64 at 0x18+16=0x28)
+     *
+     * Wait, SYSRET CS = base + 16 for 64-bit, base + 0 for 32-bit
+     * SYSRET SS = base + 8
+     *
+     * We want User CS = 0x28, User SS = 0x20
+     * So base = 0x28 - 16 = 0x18
+     */
+    u64 star = ((u64)0x18 << 48) |  /* SYSRET CS/SS base */
+               ((u64)0x08 << 32);    /* SYSCALL CS/SS base */
+    wrmsr(MSR_STAR, star);
+    kprintf("  STAR MSR configured\n");
+
+    /* Set LSTAR to our syscall entry point */
+    wrmsr(MSR_LSTAR, (u64)syscall_entry_simple);
+    kprintf("  LSTAR set to syscall_entry_simple\n");
+
+    /* CSTAR is for 32-bit compatibility mode - not used yet */
+    wrmsr(MSR_CSTAR, 0);
+
+    /* Set SFMASK - flags to clear on SYSCALL */
+    /* Clear IF (interrupts), TF (trap flag), AC (alignment check) */
+    wrmsr(MSR_SFMASK, SYSCALL_RFLAGS_MASK);
+    kprintf("  SFMASK configured\n");
+
+    kprintf("System calls initialized\n");
+}
