@@ -109,8 +109,13 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
         /* Handle flags */
         char pad = ' ';
         int width = 0;
+        int left_justify = 0;
 
-        if (*p == '0') {
+        if (*p == '-') {
+            left_justify = 1;
+            p++;
+        }
+        if (*p == '0' && !left_justify) {
             pad = '0';
             p++;
         }
@@ -147,8 +152,29 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
+            int slen = 0;
+            const char *sp = s;
+            while (*sp) { slen++; sp++; }
+
+            /* Right-pad first if right-justified */
+            if (!left_justify) {
+                while (slen < width && out < end) {
+                    *out++ = ' ';
+                    width--;
+                }
+            }
+
+            /* Copy string */
             while (*s && out < end) {
                 *out++ = *s++;
+            }
+
+            /* Left-pad if left-justified */
+            if (left_justify) {
+                while (slen < width && out < end) {
+                    *out++ = ' ';
+                    slen++;
+                }
             }
             break;
         }
@@ -164,11 +190,22 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
                 val = va_arg(ap, int);
             }
             char tmp[24];
-            int len = format_number(tmp, sizeof(tmp), val, 10, 1, width, pad);
+            int len = format_number(tmp, sizeof(tmp), val, 10, 1,
+                                    left_justify ? 0 : width, pad);
+
+            /* Right-pad first if right-justified (already handled by format_number) */
+            /* Copy number */
             for (int i = 0; tmp[i] && out < end; i++) {
                 *out++ = tmp[i];
             }
-            (void)len;
+
+            /* Left-pad if left-justified */
+            if (left_justify) {
+                while (len < width && out < end) {
+                    *out++ = ' ';
+                    len++;
+                }
+            }
             break;
         }
 

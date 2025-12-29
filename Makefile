@@ -105,12 +105,16 @@ $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.asm
 	@$(AS) $(ASFLAGS) $< -o $@
 
 # Build the ISO image
-$(ISO): $(BUILD_DIR)/$(KERNEL) $(BUILD_DIR)/init.elf limine.conf
+$(ISO): $(BUILD_DIR)/$(KERNEL) $(SERVER_BINS) limine.conf
 	@echo "  ISO     $@"
 	@rm -rf $(ISO_DIR)
 	@mkdir -p $(ISO_DIR)/boot
 	@cp $(BUILD_DIR)/$(KERNEL) $(ISO_DIR)/boot/
 	@cp $(BUILD_DIR)/init.elf $(ISO_DIR)/boot/
+	@cp $(BUILD_DIR)/mem.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/proc.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/vfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/ramfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp limine.conf $(ISO_DIR)/boot/
 	@# Try to find limine in common locations
 	@if [ -d "/usr/share/limine" ]; then \
