@@ -456,7 +456,6 @@ void thread_exit(int code)
 
     /* Mark thread as exiting */
     t->flags |= TF_EXITING;
-    t->state = TASK_DEAD;
 
     /* Remove from process */
     u64 flags;
@@ -465,10 +464,21 @@ void thread_exit(int code)
     proc->nr_threads--;
     spin_unlock_irqrestore(&proc->lock, flags);
 
-    /* If last thread, process exits too */
+    /* If last thread, process exits too - become zombie and wake parent */
     if (proc->nr_threads == 0) {
         proc->exit_code = code;
-        /* TODO: Notify parent, become zombie, etc. */
+        t->state = TASK_ZOMBIE;  /* Become zombie for wait() */
+
+        /* Wake up parent if it's waiting */
+        struct process *parent = proc->parent;
+        if (parent && parent->main_thread) {
+            if (parent->main_thread->state == TASK_INTERRUPTIBLE) {
+                parent->main_thread->state = TASK_RUNNING;
+                sched_add(parent->main_thread);
+            }
+        }
+    } else {
+        t->state = TASK_DEAD;
     }
 
     /* Schedule away - we'll never return */
@@ -590,18 +600,44 @@ pid_t process_fork(void)
     /* The context's RIP should point to ret_from_fork */
     child_thread->context.rip = (u64)ret_from_fork;
 
-    /* Adjust RSP to point to child's kernel stack */
-    u64 parent_kstack_base = (u64)parent_thread->kernel_stack;
-    u64 child_kstack_base = (u64)child_thread->kernel_stack;
-    u64 rsp_offset = parent_thread->context.rsp - parent_kstack_base;
-    child_thread->context.rsp = child_kstack_base + rsp_offset;
+    /* Calculate child's kernel stack top */
+    u64 child_kstack_top = (u64)child_thread->kernel_stack + child_thread->kernel_stack_size;
 
-    /* Same for RBP if it points into kernel stack */
-    if (parent_thread->context.rbp >= parent_kstack_base &&
-        parent_thread->context.rbp < parent_kstack_base + KERNEL_STACK_SIZE) {
-        u64 rbp_offset = parent_thread->context.rbp - parent_kstack_base;
-        child_thread->context.rbp = child_kstack_base + rbp_offset;
+    /*
+     * IMPORTANT: The syscall frame is on the per-CPU syscall stack, not the
+     * thread's kernel stack. We need to copy it to the child's kernel stack
+     * so ret_from_fork can find it.
+     *
+     * The syscall frame is 176 bytes (15 regs + error + int_no + 5 iret values).
+     * get_percpu_kernel_rsp() returns (stack_top - 8), so after pushing 176 bytes,
+     * the frame starts at (stack_top - 8 - 176) = (stack_top - 184).
+     *
+     * We copy to child_kstack_top - 176 so that ret_from_fork's
+     * `lea rsp, [r12 - 176]` with r12=child_kstack_top finds r15 correctly.
+     */
+    extern u64 get_percpu_kernel_rsp(void);
+    u64 percpu_stack_rsp = get_percpu_kernel_rsp();  /* = stack_top - 8 */
+
+    /* Source: where the frame actually is on per-CPU stack */
+    u64 *src = (u64 *)(percpu_stack_rsp - 176);  /* = stack_top - 184 */
+    /* Destination: where ret_from_fork expects it */
+    u64 *dst = (u64 *)(child_kstack_top - 176);
+    for (int i = 0; i < 176 / 8; i++) {
+        dst[i] = src[i];
     }
+
+    /* r12 passes the kernel stack top to ret_from_fork */
+    child_thread->context.r12 = child_kstack_top;
+
+    /* RSP doesn't matter much since ret_from_fork will reset it based on r12 */
+    child_thread->context.rsp = child_kstack_top - 256;
+
+    /* Clear other callee-saved registers */
+    child_thread->context.rbp = 0;
+    child_thread->context.rbx = 0;
+    child_thread->context.r13 = 0;
+    child_thread->context.r14 = 0;
+    child_thread->context.r15 = 0;
 
     /* Link child thread to child process */
     spin_lock_irqsave(&child->lock, &flags);
@@ -624,43 +660,54 @@ pid_t process_fork(void)
 pid_t process_wait(int *status)
 {
     struct process *proc = get_current_process();
-    if (!proc) {
+    struct thread *t = current_thread;
+    if (!proc || !t) {
         return -1;
     }
 
-    /* TODO: Proper wait implementation with blocking */
-    /* For now, just check for zombie children */
+retry:
+    {
+        u64 flags;
+        spin_lock_irqsave(&proc->lock, &flags);
 
-    u64 flags;
-    spin_lock_irqsave(&proc->lock, &flags);
-
-    struct process *child;
-    list_for_each_entry(child, &proc->children, sibling) {
-        /* Check if child is zombie */
-        if (child->main_thread &&
-            child->main_thread->state == TASK_ZOMBIE) {
-            pid_t pid = child->pid;
-            if (status) {
-                *status = child->exit_code;
-            }
-
-            /* Remove from children list */
-            list_del(&child->sibling);
-
+        /* First check if we have any children at all */
+        if (list_empty(&proc->children)) {
             spin_unlock_irqrestore(&proc->lock, flags);
-
-            /* TODO: Free child resources */
-            free_pid(pid);
-
-            return pid;
+            return -1;  /* No children - ECHILD */
         }
+
+        /* Check for zombie children */
+        struct process *child;
+        list_for_each_entry(child, &proc->children, sibling) {
+            if (child->main_thread &&
+                child->main_thread->state == TASK_ZOMBIE) {
+                pid_t pid = child->pid;
+                if (status) {
+                    *status = child->exit_code;
+                }
+
+                /* Remove from children list */
+                list_del(&child->sibling);
+
+                spin_unlock_irqrestore(&proc->lock, flags);
+
+                /* Free child resources */
+                free_pid(pid);
+
+                return pid;
+            }
+        }
+
+        /* No zombie children - block and wait */
+        t->state = TASK_INTERRUPTIBLE;
+        spin_unlock_irqrestore(&proc->lock, flags);
     }
 
-    spin_unlock_irqrestore(&proc->lock, flags);
+    /* Schedule away - child's exit will wake us */
+    schedule();
 
-    /* No zombie children found */
-    /* TODO: Block and wait */
-    return -1;
+    /* We were woken up - check again for zombies */
+    goto retry;
 }
 
 /*

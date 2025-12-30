@@ -14,6 +14,7 @@
 extern void serial_early_init(void);
 extern int kprintf(const char *fmt, ...);
 extern void *memset(void *s, int c, size_t n);
+extern char *strstr(const char *haystack, const char *needle);
 
 /* Architecture initialization */
 extern void gdt_init(void);
@@ -446,13 +447,8 @@ static void kernel_main(void)
             struct cached_module *mod = &boot_info.cached_modules[i];
             kprintf("Checking module: %s\n", mod->cmdline);
 
-            /* Look for init module */
-            const char *cmdline = mod->cmdline;
-            /* Check if cmdline contains "init" */
-            if ((cmdline[0] == 'i' && cmdline[1] == 'n' &&
-                 cmdline[2] == 'i' && cmdline[3] == 't') ||
-                (cmdline[0] == '/' && cmdline[1] == 'i')) {
-
+            /* Look for init module - search for "init" in the cmdline */
+            if (strstr(mod->cmdline, "init") != NULL) {
                 kprintf("Found init module at %p, size %llu bytes\n",
                         mod->address, mod->size);
 

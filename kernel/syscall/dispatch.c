@@ -10,10 +10,14 @@
 #include <ocean/ipc.h>
 #include <ocean/types.h>
 #include <ocean/defs.h>
+#include <ocean/boot.h>
 
 /* External functions */
 extern int kprintf(const char *fmt, ...);
 extern void *memset(void *s, int c, size_t n);
+extern size_t strlen(const char *s);
+extern int strcmp(const char *s1, const char *s2);
+extern char *strstr(const char *haystack, const char *needle);
 
 /* Assembly entry point */
 extern void syscall_entry_simple(void);
@@ -21,12 +25,30 @@ extern void syscall_entry_simple(void);
 /* Per-CPU data for syscall handling */
 struct percpu_syscall {
     u64 user_rsp;           /* Saved user RSP (offset 0) */
-    u64 kernel_rsp;         /* Kernel stack top (offset 8) */
+    u64 kernel_rsp;         /* Thread kernel stack top (offset 8) */
     u64 scratch;            /* Scratch space (offset 16) */
+    u64 trampoline_rsp;     /* Boot/fallback stack (offset 24) */
 };
 
 /* For now, single CPU only */
 static struct percpu_syscall percpu_data __aligned(16);
+
+/*
+ * Get the per-CPU kernel RSP (used by fork to copy syscall frame)
+ */
+u64 get_percpu_kernel_rsp(void)
+{
+    return percpu_data.kernel_rsp;
+}
+
+/*
+ * Set the per-CPU kernel RSP to a thread's kernel stack top
+ * Called during context switch to update which stack syscalls use
+ */
+void set_percpu_kernel_rsp(u64 rsp)
+{
+    percpu_data.kernel_rsp = rsp;
+}
 
 /*
  * System call handlers
@@ -35,7 +57,6 @@ static struct percpu_syscall percpu_data __aligned(16);
 /* SYS_EXIT - Terminate the current process */
 static i64 sys_exit(i64 code)
 {
-    kprintf("[syscall] exit(%lld)\n", code);
     process_exit((int)code);
     /* Never returns */
     return 0;
@@ -74,6 +95,52 @@ static i64 sys_debug_print(const char *msg, u64 len)
     return (i64)len;
 }
 
+/* SYS_READ - Read from file descriptor (minimal implementation) */
+static i64 sys_read(int fd, char *buf, u64 count)
+{
+    /* For now, only support stdin (fd 0) */
+    if (fd != 0) {
+        return -1;  /* EBADF */
+    }
+
+    extern int serial_getc(void);
+    extern void serial_putc(char c);
+    extern bool serial_data_available(void);
+
+    u64 i = 0;
+    while (i < count) {
+        /* Wait for data with interrupts enabled so timer can tick */
+        while (!serial_data_available()) {
+            __asm__ volatile("sti; hlt; cli");  /* Enable, halt, disable */
+        }
+
+        /* Read with interrupts disabled */
+        __asm__ volatile("cli");
+        int c = serial_getc();
+        __asm__ volatile("sti");
+
+        if (c < 0) {
+            break;
+        }
+
+        buf[i++] = (char)c;
+
+        /* Echo the character */
+        serial_putc((char)c);
+
+        /* Stop at newline */
+        if (c == '\n' || c == '\r') {
+            if (c == '\r') {
+                buf[i-1] = '\n';
+                serial_putc('\n');
+            }
+            break;
+        }
+    }
+
+    return (i64)i;
+}
+
 /* SYS_WRITE - Write to file descriptor (minimal implementation) */
 static i64 sys_write(int fd, const char *buf, u64 count)
 {
@@ -89,6 +156,72 @@ static i64 sys_write(int fd, const char *buf, u64 count)
     }
 
     return (i64)count;
+}
+
+/*
+ * Process creation syscalls
+ */
+
+/* SYS_FORK - Create child process */
+static i64 sys_fork(void)
+{
+    return (i64)process_fork();
+}
+
+/* Find a boot module by name (searches cmdline for the name) */
+static struct cached_module *find_boot_module(const char *name)
+{
+    const struct boot_info *boot = get_boot_info();
+
+    for (u64 i = 0; i < boot->cached_module_count; i++) {
+        struct cached_module *mod = (struct cached_module *)&boot->cached_modules[i];
+        /* Check if name appears in the module's cmdline/path */
+        if (strstr(mod->cmdline, name) != NULL) {
+            return mod;
+        }
+    }
+    return NULL;
+}
+
+/* SYS_EXEC - Execute a program (replaces current process) */
+static i64 sys_exec(const char *path, char *const argv[], char *const envp[])
+{
+    (void)argv;
+    (void)envp;
+
+    if (!path) {
+        return -1;  /* EINVAL */
+    }
+
+    /* Find the module in boot modules */
+    struct cached_module *mod = find_boot_module(path);
+    if (!mod) {
+        kprintf("exec: '%s' not found\n", path);
+        return -1;  /* ENOENT */
+    }
+
+    /* Extract just the filename from path */
+    const char *name = path;
+    const char *p = path;
+    while (*p) {
+        if (*p == '/') {
+            name = p + 1;
+        }
+        p++;
+    }
+
+    /* Load ELF and replace current process */
+    extern int exec_replace(const void *elf_data, size_t elf_size, const char *name);
+    exec_replace(mod->address, mod->size, name);
+
+    /* exec_replace never returns on success */
+    return -1;
+}
+
+/* SYS_WAIT - Wait for child process */
+static i64 sys_wait(int *status)
+{
+    return (i64)process_wait(status);
 }
 
 /*
@@ -157,6 +290,9 @@ static i64 sys_endpoint_destroy_impl(u32 ep_id)
 static syscall_handler_t syscall_table[NR_SYSCALLS] = {
     /* Process control */
     [SYS_EXIT]          = (syscall_handler_t)sys_exit,
+    [SYS_FORK]          = (syscall_handler_t)sys_fork,
+    [SYS_EXEC]          = (syscall_handler_t)sys_exec,
+    [SYS_WAIT]          = (syscall_handler_t)sys_wait,
     [SYS_GETPID]        = (syscall_handler_t)sys_getpid,
     [SYS_GETPPID]       = (syscall_handler_t)sys_getppid,
 
@@ -164,6 +300,7 @@ static syscall_handler_t syscall_table[NR_SYSCALLS] = {
     [SYS_YIELD]         = (syscall_handler_t)sys_yield,
 
     /* File operations */
+    [SYS_READ]          = (syscall_handler_t)sys_read,
     [SYS_WRITE]         = (syscall_handler_t)sys_write,
 
     /* IPC - Message passing */
@@ -243,16 +380,18 @@ void syscall_init(void)
     /* Set up per-CPU data */
     memset(&percpu_data, 0, sizeof(percpu_data));
 
-    /* Allocate a kernel stack for syscall entry */
+    /* Allocate a trampoline stack for boot/fallback */
     extern void *kmalloc(size_t size);
     void *syscall_stack = kmalloc(8192);
     if (!syscall_stack) {
         kprintf("  Failed to allocate syscall stack!\n");
         return;
     }
-    percpu_data.kernel_rsp = (u64)syscall_stack + 8192 - 8;
+    u64 stack_top = (u64)syscall_stack + 8192 - 8;
+    percpu_data.trampoline_rsp = stack_top;
+    percpu_data.kernel_rsp = stack_top;  /* Use trampoline until threads run */
 
-    kprintf("  Syscall stack at %p\n", syscall_stack);
+    kprintf("  Trampoline stack at %p\n", syscall_stack);
 
     /* Set up GS base to point to per-CPU data */
     /* MSR_GS_BASE = 0xC0000101, MSR_KERNEL_GS_BASE = 0xC0000102 */

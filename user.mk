@@ -64,6 +64,25 @@ EXT2_OBJS := $(EXT2_SRCS:$(FS_DIR)/ext2/%.c=$(BUILD_DIR)/fs/ext2/%.o)
 ATA_SRCS := $(wildcard $(DRIVERS_DIR)/ata/*.c)
 ATA_OBJS := $(ATA_SRCS:$(DRIVERS_DIR)/ata/%.c=$(BUILD_DIR)/drivers/ata/%.o)
 
+# Shell
+SH_SRCS := $(wildcard $(SERVERS_DIR)/sh/*.c)
+SH_OBJS := $(SH_SRCS:$(SERVERS_DIR)/sh/%.c=$(BUILD_DIR)/servers/sh/%.o)
+
+# Bin utilities directory
+BIN_DIR := bin
+
+# Echo utility
+ECHO_SRCS := $(wildcard $(BIN_DIR)/echo.c)
+ECHO_OBJS := $(ECHO_SRCS:$(BIN_DIR)/%.c=$(BUILD_DIR)/bin/%.o)
+
+# Cat utility
+CAT_SRCS := $(wildcard $(BIN_DIR)/cat.c)
+CAT_OBJS := $(CAT_SRCS:$(BIN_DIR)/%.c=$(BUILD_DIR)/bin/%.o)
+
+# Ls utility
+LS_SRCS := $(wildcard $(BIN_DIR)/ls.c)
+LS_OBJS := $(LS_SRCS:$(BIN_DIR)/%.c=$(BUILD_DIR)/bin/%.o)
+
 # Userspace linker script
 USER_LD_SCRIPT := user.ld
 
@@ -75,7 +94,11 @@ SERVER_BINS := $(BUILD_DIR)/init.elf \
                $(BUILD_DIR)/blk.elf \
                $(BUILD_DIR)/ramfs.elf \
                $(BUILD_DIR)/ext2.elf \
-               $(BUILD_DIR)/ata.elf
+               $(BUILD_DIR)/ata.elf \
+               $(BUILD_DIR)/sh.elf \
+               $(BUILD_DIR)/echo.elf \
+               $(BUILD_DIR)/cat.elf \
+               $(BUILD_DIR)/ls.elf
 
 # Build libc objects
 $(BUILD_DIR)/libc/%.o: $(LIBC_DIR)/src/%.c
@@ -136,6 +159,18 @@ $(BUILD_DIR)/drivers/ata/%.o: $(DRIVERS_DIR)/ata/%.c
 	@mkdir -p $(dir $@)
 	@$(CC) $(USER_CFLAGS) -c $< -o $@
 
+# Build shell
+$(BUILD_DIR)/servers/sh/%.o: $(SERVERS_DIR)/sh/%.c
+	@echo "  CC [sh] $<"
+	@mkdir -p $(dir $@)
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
+# Build bin utilities
+$(BUILD_DIR)/bin/%.o: $(BIN_DIR)/%.c
+	@echo "  CC [bin] $<"
+	@mkdir -p $(dir $@)
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
 # Helper function to link a userspace binary
 define link_user_binary
 	@echo "  LD [user] $@"
@@ -174,6 +209,22 @@ $(BUILD_DIR)/ext2.elf: $(EXT2_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
 # Link ATA driver
 $(BUILD_DIR)/ata.elf: $(ATA_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
 	$(call link_user_binary,$(ATA_OBJS))
+
+# Link shell
+$(BUILD_DIR)/sh.elf: $(SH_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(SH_OBJS))
+
+# Link echo utility
+$(BUILD_DIR)/echo.elf: $(ECHO_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(ECHO_OBJS))
+
+# Link cat utility
+$(BUILD_DIR)/cat.elf: $(CAT_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(CAT_OBJS))
+
+# Link ls utility
+$(BUILD_DIR)/ls.elf: $(LS_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(LS_OBJS))
 
 # Phony targets
 .PHONY: userspace

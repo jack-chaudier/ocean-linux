@@ -190,6 +190,33 @@ static inline int yield(void)
     return (int)syscall0(SYS_YIELD);
 }
 
+static inline int fork(void)
+{
+    return (int)syscall0(SYS_FORK);
+}
+
+static inline int exec(const char *path, char *const argv[], char *const envp[])
+{
+    return (int)syscall3(SYS_EXEC, (int64_t)path, (int64_t)argv, (int64_t)envp);
+}
+
+static inline int execv(const char *path, char *const argv[])
+{
+    return exec(path, argv, (char *const *)0);
+}
+
+static inline int wait(int *status)
+{
+    return (int)syscall1(SYS_WAIT, (int64_t)status);
+}
+
+static inline int waitpid(int pid, int *status, int options)
+{
+    (void)pid;      /* TODO: implement specific pid waiting */
+    (void)options;  /* TODO: implement options */
+    return wait(status);
+}
+
 static inline int64_t write(int fd, const void *buf, uint64_t count)
 {
     return syscall3(SYS_WRITE, fd, (int64_t)buf, count);

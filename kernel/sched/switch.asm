@@ -61,7 +61,71 @@ switch_context:
 ; Entry point for newly forked processes.
 ; Child returns from fork with 0 in rax.
 ;
+; When we get here (via switch_context):
+;   r12 = kernel stack top address (set in process_fork)
+;
+; The syscall frame layout on kernel stack (from top):
+;   -8:   SS
+;   -16:  user RSP
+;   -24:  user RFLAGS
+;   -32:  CS
+;   -40:  user RIP
+;   -48:  error_code
+;   -56:  int_no
+;   -64:  RAX (syscall number / return value)
+;   -72:  RBX
+;   -80:  RCX
+;   -88:  RDX
+;   -96:  RSI
+;   -104: RDI
+;   -112: RBP
+;   -120: R8
+;   -128: R9
+;   -136: R10
+;   -144: R11
+;   -152: R12
+;   -160: R13
+;   -168: R14
+;   -176: R15  <-- saved registers start here
+;
 ret_from_fork:
-    xor eax, eax            ; Return 0 (child's fork return value)
-    ; Fall through to return to user space (future syscall return)
-    ret
+    ; Set RSP to point to saved r15 (start of general regs)
+    ; r12 contains kernel stack top, frame is at r12 - 176
+    lea rsp, [r12 - 176]
+
+    ; Set RAX (return value) to 0 for child
+    ; RAX is at offset 14*8 = 112 from r15
+    mov qword [rsp + 112], 0
+
+    ; Restore all registers (same order as syscall_entry_simple)
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax                     ; Fork return value = 0
+
+    ; Skip error code and int_no
+    add rsp, 16
+
+    ; Pop the iret frame for SYSRET
+    ; Stack: RIP, CS, RFLAGS, RSP, SS
+    pop rcx                     ; User RIP -> RCX (for SYSRET)
+    add rsp, 8                  ; Skip CS
+    pop r11                     ; User RFLAGS -> R11 (for SYSRET)
+    pop rsp                     ; User RSP
+
+    ; Switch back to user GS base
+    swapgs
+
+    ; Return to user mode
+    o64 sysret

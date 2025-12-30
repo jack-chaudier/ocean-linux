@@ -64,7 +64,7 @@ void vmm_init(void)
 /*
  * Create a new VMA
  */
-static struct vm_area *vma_alloc(void)
+struct vm_area *vma_alloc(void)
 {
     struct vm_area *vma;
 
@@ -157,7 +157,7 @@ static struct vm_area *vma_find_intersect(struct address_space *as,
 /*
  * Insert VMA in sorted order
  */
-static void vma_insert(struct address_space *as, struct vm_area *new_vma)
+void vma_insert(struct address_space *as, struct vm_area *new_vma)
 {
     struct vm_area *vma;
     struct list_head *pos = &as->vma_list;
@@ -505,6 +505,7 @@ struct address_space *vmm_clone_address_space(struct address_space *src)
     /* Clone all VMAs */
     struct vm_area *vma;
     list_for_each_entry(vma, &src->vma_list, list) {
+
         struct vm_area *new_vma = vma_alloc();
         if (!new_vma) {
             vmm_destroy_address_space(dst);
@@ -514,25 +515,36 @@ struct address_space *vmm_clone_address_space(struct address_space *src)
         *new_vma = *vma;
         INIT_LIST_HEAD(&new_vma->list);
 
-        /* For each page in the VMA, set up COW */
+        /* For each page in the VMA, do a full copy (not COW for now) */
         for (u64 addr = vma->start; addr < vma->end; addr += PAGE_SIZE) {
             pte_t *src_pte = paging_get_pte(src->pml4, addr);
             if (!src_pte || !(*src_pte & PTE_PRESENT)) {
                 continue;
             }
 
-            phys_addr_t phys = *src_pte & PTE_ADDR_MASK;
+            phys_addr_t src_phys = *src_pte & PTE_ADDR_MASK;
+            u64 flags = *src_pte & ~PTE_ADDR_MASK;
 
-            /* Mark both pages as COW (read-only + COW flag) */
-            *src_pte = (*src_pte & ~PTE_WRITABLE) | PTE_COW;
-            tlb_flush_page(addr);
+            /* Allocate a new physical page for the child */
+            void *new_page = get_free_page();
+            if (!new_page) {
+                kprintf("[vmm] Failed to allocate page for fork\n");
+                continue;
+            }
 
-            /* Map same physical page in child */
-            u64 flags = (*src_pte & ~PTE_ADDR_MASK);
-            paging_map(dst->pml4, addr, phys, flags);
+            /* Convert to physical address */
+            const struct boot_info *boot = get_boot_info();
+            phys_addr_t new_phys = (phys_addr_t)new_page - boot->hhdm_offset;
 
-            /* Increment page reference count */
-            /* TODO: track page refcounts in struct page */
+            /* Copy the page contents */
+            void *src_virt = (void *)(src_phys + boot->hhdm_offset);
+            memcpy(new_page, src_virt, PAGE_SIZE);
+
+            /* Map the new page in child's address space */
+            int ret = paging_map(dst->pml4, addr, new_phys, flags);
+            if (ret != 0) {
+                kprintf("[vmm] Failed to map page at 0x%llx\n", addr);
+            }
         }
 
         vma_insert(dst, new_vma);

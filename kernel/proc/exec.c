@@ -26,9 +26,26 @@ extern void *get_free_page(unsigned int gfp_flags);
 
 /* From syscall entry */
 extern void enter_usermode(u64 entry, u64 stack, u64 flags);
+extern void enter_usermode_from_syscall(u64 entry, u64 stack, u64 flags);
 
 /* From process.c */
 extern struct thread *process_create_main_thread(struct process *proc, u64 entry, u64 stack_top);
+
+/* From vmm.c */
+extern struct vm_area *vma_alloc(void);
+extern void vma_insert(struct address_space *as, struct vm_area *vma);
+extern void INIT_LIST_HEAD(struct list_head *list);
+extern void vmm_destroy_address_space(struct address_space *as);
+extern void paging_switch(struct address_space *as);
+
+/* From sched */
+extern struct thread *current_thread;
+
+/* VMA flags (matching vmm.h) */
+#define VMA_READ    0x1
+#define VMA_WRITE   0x2
+#define VMA_EXEC    0x4
+#define VMA_USER    0x8
 
 /*
  * User stack parameters
@@ -56,9 +73,6 @@ static int load_segment(struct address_space *as, const void *elf_data,
     u64 vaddr_aligned = vaddr & ~(PAGE_SIZE - 1);
     u64 offset_in_page = vaddr - vaddr_aligned;
     u64 memsz_aligned = (memsz + offset_in_page + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
-    kprintf("    Loading segment: vaddr=0x%llx, filesz=%llu, memsz=%llu\n",
-            vaddr, filesz, memsz);
 
     /* Determine page flags */
     u64 flags = PTE_PRESENT | PTE_USER;
@@ -126,6 +140,30 @@ static int load_segment(struct address_space *as, const void *elf_data,
         paging_map(as->pml4, target_vaddr, phys_addr, flags);
     }
 
+    /* Create a VMA for this segment */
+    struct vm_area *vma = vma_alloc();
+    if (!vma) {
+        kprintf("    Failed to allocate VMA!\n");
+        return -1;
+    }
+
+    /* Convert ELF segment flags to VMA flags */
+    u32 vma_flags = VMA_USER | VMA_READ;  /* Always readable by user */
+    if (phdr->p_flags & PF_W) {
+        vma_flags |= VMA_WRITE;
+    }
+    if (phdr->p_flags & PF_X) {
+        vma_flags |= VMA_EXEC;
+    }
+
+    vma->start = vaddr_aligned;
+    vma->end = vaddr_aligned + memsz_aligned;
+    vma->flags = vma_flags;
+    vma->page_prot = flags;  /* PTE flags */
+    INIT_LIST_HEAD(&vma->list);
+
+    vma_insert(as, vma);
+
     return 0;
 }
 
@@ -140,9 +178,6 @@ static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
 
     /* Allocate stack pages */
     u64 stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-
-    kprintf("    Setting up user stack: 0x%llx - 0x%llx\n",
-            stack_bottom, USER_STACK_TOP);
 
     for (u64 addr = stack_bottom; addr < USER_STACK_TOP; addr += PAGE_SIZE) {
         void *phys_page = get_free_page(GFP_USER);
@@ -186,6 +221,21 @@ static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
     (void)argv;
     (void)envp;
 
+    /* Create VMA for the stack */
+    struct vm_area *stack_vma = vma_alloc();
+    if (!stack_vma) {
+        kprintf("    Failed to allocate stack VMA!\n");
+        return 0;
+    }
+
+    stack_vma->start = stack_bottom;
+    stack_vma->end = USER_STACK_TOP;
+    stack_vma->flags = VMA_USER | VMA_READ | VMA_WRITE;
+    stack_vma->page_prot = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX;
+    INIT_LIST_HEAD(&stack_vma->list);
+
+    vma_insert(as, stack_vma);
+
     return sp;
 }
 
@@ -200,11 +250,9 @@ static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
  */
 pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
 {
-    kprintf("exec_elf: Loading '%s' (%zu bytes)\n", name, elf_size);
-
     /* Validate ELF header */
     if (elf_size < sizeof(Elf64_Ehdr)) {
-        kprintf("  Error: File too small for ELF header\n");
+        kprintf("exec_elf: File too small\n");
         return -1;
     }
 
@@ -212,28 +260,21 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
 
     int err = elf_validate(ehdr);
     if (err != ELF_OK) {
-        kprintf("  Error: Invalid ELF file (error %d)\n", err);
+        kprintf("exec_elf: Invalid ELF (error %d)\n", err);
         return -1;
     }
-
-    kprintf("  Entry point: 0x%llx\n", ehdr->e_entry);
-    kprintf("  Program headers: %d at offset 0x%llx\n",
-            ehdr->e_phnum, ehdr->e_phoff);
 
     /* Create new process */
     struct process *proc = process_create(name);
     if (!proc) {
-        kprintf("  Error: Failed to create process\n");
+        kprintf("exec_elf: Failed to create process\n");
         return -1;
     }
-
-    kprintf("  Created process PID %d\n", proc->pid);
 
     /* Create address space */
     proc->mm = vmm_create_address_space();
     if (!proc->mm) {
-        kprintf("  Error: Failed to create address space\n");
-        /* TODO: cleanup process */
+        kprintf("exec_elf: Failed to create address space\n");
         return -1;
     }
 
@@ -243,8 +284,7 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdrs[i].p_type == PT_LOAD) {
             if (load_segment(proc->mm, elf_data, &phdrs[i]) < 0) {
-                kprintf("  Error: Failed to load segment %d\n", i);
-                /* TODO: cleanup */
+                kprintf("exec_elf: Failed to load segment %d\n", i);
                 return -1;
             }
         }
@@ -253,25 +293,19 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
     /* Set up user stack */
     u64 user_sp = setup_user_stack(proc->mm, 0, NULL, NULL);
     if (user_sp == 0) {
-        kprintf("  Error: Failed to set up stack\n");
+        kprintf("exec_elf: Failed to set up stack\n");
         return -1;
     }
 
     /* Create main thread */
     struct thread *main_thread = process_create_main_thread(proc, ehdr->e_entry, user_sp);
     if (!main_thread) {
-        kprintf("  Error: Failed to create main thread\n");
+        kprintf("exec_elf: Failed to create main thread\n");
         return -1;
     }
 
-    /* The thread will enter user mode when scheduled */
-    main_thread->flags &= ~TF_KTHREAD;  /* Mark as user thread */
-
-    /* Set thread's regs pointer for user mode return */
-    /* This will be used to set up the initial register state */
-
-    kprintf("  Process ready: entry=0x%llx, stack=0x%llx\n",
-            ehdr->e_entry, user_sp);
+    /* Mark as user thread */
+    main_thread->flags &= ~TF_KTHREAD;
 
     /* Add to scheduler */
     thread_start(main_thread);
@@ -428,4 +462,93 @@ void exec_test_user_mode(void)
 
     /* Should never reach here */
     kprintf("ERROR: Returned from user mode!\n");
+}
+
+/*
+ * Replace current process with new executable
+ *
+ * This is the actual exec() implementation that replaces the calling
+ * process's address space with a new program and enters user mode.
+ * This function does not return on success.
+ */
+int exec_replace(const void *elf_data, size_t elf_size, const char *name)
+{
+    /* Validate ELF header */
+    const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_data;
+
+    if (elf_size < sizeof(Elf64_Ehdr)) {
+        kprintf("exec: File too small\n");
+        return -1;
+    }
+
+    if (ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
+        ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
+        ehdr->e_ident[EI_MAG2] != ELFMAG2 ||
+        ehdr->e_ident[EI_MAG3] != ELFMAG3) {
+        kprintf("exec: Not an ELF file\n");
+        return -1;
+    }
+
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
+        kprintf("exec: Not a 64-bit ELF\n");
+        return -1;
+    }
+
+    if (ehdr->e_type != ET_EXEC) {
+        kprintf("exec: Not an executable\n");
+        return -1;
+    }
+
+    if (ehdr->e_machine != EM_X86_64) {
+        kprintf("exec: Not x86_64\n");
+        return -1;
+    }
+
+    /* Get current process and thread */
+    struct thread *t = current_thread;
+    struct process *proc = t->process;
+
+    if (!proc) {
+        kprintf("exec: No current process\n");
+        return -1;
+    }
+
+    kprintf("exec: %s (pid %d)\n", name, proc->pid);
+
+    /* Save old address space - can't destroy while still using it */
+    struct address_space *old_mm = proc->mm;
+    (void)old_mm;  /* TODO: destroy after switch */
+
+    /* Create new address space */
+    proc->mm = vmm_create_address_space();
+    if (!proc->mm) {
+        kprintf("exec: Failed to create address space\n");
+        return -1;
+    }
+
+    /* Load program segments */
+    const Elf64_Phdr *phdrs = (const Elf64_Phdr *)((const u8 *)elf_data + ehdr->e_phoff);
+
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        if (phdrs[i].p_type == PT_LOAD) {
+            if (load_segment(proc->mm, elf_data, &phdrs[i]) < 0) {
+                kprintf("exec: Failed to load segment %d\n", i);
+                return -1;
+            }
+        }
+    }
+
+    /* Set up user stack */
+    u64 user_sp = setup_user_stack(proc->mm, 0, NULL, NULL);
+    if (user_sp == 0) {
+        kprintf("exec: Failed to set up stack\n");
+        return -1;
+    }
+
+    /* Switch to new address space and enter user mode */
+    paging_switch(proc->mm);
+    enter_usermode_from_syscall(ehdr->e_entry, user_sp, 0x202);
+
+    /* Should never reach here */
+    return -1;
 }

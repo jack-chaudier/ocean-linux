@@ -236,6 +236,16 @@ void switch_to(struct thread *prev, struct thread *next)
         }
     }
 
+    /*
+     * Update per-CPU kernel stack for syscalls.
+     * When the next thread makes a syscall, it will use its own kernel stack.
+     */
+    if (next->kernel_stack) {
+        extern void set_percpu_kernel_rsp(u64 rsp);
+        u64 next_kstack_top = (u64)next->kernel_stack + next->kernel_stack_size - 8;
+        set_percpu_kernel_rsp(next_kstack_top);
+    }
+
     /* Update statistics */
     rq->switches++;
     next->last_run = global_ticks;

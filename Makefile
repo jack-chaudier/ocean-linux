@@ -118,6 +118,10 @@ $(ISO): $(BUILD_DIR)/$(KERNEL) $(SERVER_BINS) limine.conf
 	@cp $(BUILD_DIR)/ramfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/ext2.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/ata.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/sh.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/echo.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/cat.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/ls.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp limine.conf $(ISO_DIR)/boot/
 	@# Try to find limine in common locations
 	@if [ -d "/usr/share/limine" ]; then \
@@ -151,7 +155,7 @@ limine:
 		git clone https://github.com/limine-bootloader/limine.git --branch=v8.x-binary --depth=1; \
 	fi
 
-# Run in QEMU
+# Run in QEMU (serial to terminal)
 .PHONY: run
 run: $(ISO)
 	@echo "Starting QEMU..."
@@ -162,6 +166,31 @@ run: $(ISO)
 		-smp 2 \
 		-no-reboot \
 		-no-shutdown
+
+# Run in QEMU with GUI window
+.PHONY: run-gui
+run-gui: $(ISO)
+	@echo "Starting QEMU with GUI window..."
+	@echo "Use the serial console in the QEMU window (View -> serial0)"
+	@qemu-system-x86_64 \
+		-cdrom $(ISO) \
+		-serial mon:stdio \
+		-m 256M \
+		-smp 2 \
+		-no-reboot
+
+# Run in separate terminal window (macOS)
+.PHONY: run-window
+run-window: $(ISO)
+	@echo "Starting QEMU in separate window..."
+	@qemu-system-x86_64 \
+		-cdrom $(ISO) \
+		-serial pty \
+		-m 256M \
+		-smp 2 \
+		-no-reboot &
+	@sleep 1
+	@echo "Connect to the PTY shown above with: screen /dev/ttysXXX"
 
 # Run with debug (GDB server)
 .PHONY: debug
@@ -231,7 +260,9 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  all              Build kernel and ISO (default)"
-	@echo "  run              Run in QEMU"
+	@echo "  run              Run in QEMU (serial in terminal)"
+	@echo "  run-gui          Run in QEMU with GUI window"
+	@echo "  run-window       Run with serial on PTY (use screen to connect)"
 	@echo "  debug            Run in QEMU with GDB server"
 	@echo "  run-kernel       Run kernel directly (no ISO)"
 	@echo "  clean            Remove build artifacts"

@@ -14,7 +14,7 @@
 #include <ocean/ipc_proto.h>
 
 /* Version */
-#define INIT_VERSION "0.2.0"
+#define INIT_VERSION "0.3.0"
 
 /* Maximum services we track */
 #define MAX_SERVICES 16
@@ -257,6 +257,46 @@ static void print_service_status(void)
 }
 
 /*
+ * Spawn the interactive shell
+ */
+static void spawn_shell(void)
+{
+    init_log("Spawning shell...");
+
+    int pid = fork();
+    printf("[init] fork() returned %d\n", pid);
+
+    if (pid < 0) {
+        init_log("Failed to fork for shell");
+        return;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        printf("[init] CHILD: I am running! PID=%d\n", getpid());
+        printf("[init] CHILD: About to exec shell\n");
+        exec("/boot/sh.elf", NULL, NULL);
+        /* If exec returns, it failed */
+        printf("[init] exec shell failed!\n");
+        _exit(1);
+    } else {
+        printf("[init] Shell spawned with PID %d\n", pid);
+
+        /* Parent waits for shell to exit */
+        int status;
+        while (1) {
+            int child_pid = wait(&status);
+            if (child_pid == pid) {
+                printf("[init] Shell exited with status %d\n", status);
+                break;
+            }
+            /* Keep waiting */
+            yield();
+        }
+    }
+}
+
+/*
  * Main idle/event loop
  *
  * In a full implementation, this would:
@@ -267,19 +307,15 @@ static void print_service_status(void)
  */
 static void main_loop(void)
 {
-    int tick = 0;
+    init_log("Starting interactive shell");
 
-    init_log("Entering main loop");
+    /* Spawn shell - this will wait for it to exit */
+    spawn_shell();
 
-    while (tick < 100) {
-        yield();
-        tick++;
+    init_log("Shell exited, restarting...");
 
-        /* Periodic status update */
-        if (tick == 50) {
-            print_service_status();
-        }
-    }
+    /* If shell exits, respawn it */
+    spawn_shell();
 
     init_log("Main loop complete");
 }

@@ -15,6 +15,7 @@ section .text
 global syscall_entry_simple
 global syscall_return_to_user
 global enter_usermode
+global enter_usermode_from_syscall
 
 extern syscall_dispatch
 
@@ -211,9 +212,56 @@ enter_usermode:
     xor r14, r14
     xor r15, r15
 
-    ; Don't swapgs - we're entering user mode for the first time
+    ; Don't swapgs - we're entering user mode for the first time from kernel init
     ; GS base for user will be 0 (or whatever MSR_GS_BASE is)
     ; MSR_KERNEL_GS_BASE has &percpu for when SYSCALL happens
+
+    ; Return to user mode
+    iretq
+
+;
+; enter_usermode_from_syscall - Enter user mode from syscall context
+;
+; Same as enter_usermode but does swapgs because we're in a swapped state
+; from handling a syscall (like exec).
+;
+; RDI = user RIP
+; RSI = user RSP
+; RDX = user RFLAGS (or 0 for default: 0x202)
+;
+enter_usermode_from_syscall:
+    ; Use default RFLAGS if not specified
+    test rdx, rdx
+    jnz .has_flags2
+    mov rdx, 0x202                  ; IF enabled, reserved bit set
+.has_flags2:
+
+    ; Build interrupt return frame on current stack
+    push qword 0x23                 ; SS (user data: 0x20 | RPL 3)
+    push rsi                        ; RSP
+    push rdx                        ; RFLAGS
+    push qword 0x2b                 ; CS (user code 64-bit: 0x28 | RPL 3)
+    push rdi                        ; RIP
+
+    ; Clear all general purpose registers for clean start
+    xor rax, rax
+    xor rbx, rbx
+    xor rcx, rcx
+    xor rdx, rdx
+    xor rsi, rsi
+    xor rdi, rdi
+    xor rbp, rbp
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    xor r11, r11
+    xor r12, r12
+    xor r13, r13
+    xor r14, r14
+    xor r15, r15
+
+    ; Swap GS bases - we were in syscall context with kernel GS
+    swapgs
 
     ; Return to user mode
     iretq
