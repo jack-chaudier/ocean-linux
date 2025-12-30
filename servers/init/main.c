@@ -55,21 +55,45 @@ static struct service services[MAX_SERVICES] = {
         .state = SVC_STOPPED,
         .priority = 1,
     },
-    /* Priority 2: Filesystem */
+    /* Priority 2: Block device server */
+    {
+        .name = "blk",
+        .path = "/boot/blk.elf",
+        .well_known_ep = EP_BLK,
+        .state = SVC_STOPPED,
+        .priority = 2,
+    },
+    /* Priority 3: ATA disk driver */
+    {
+        .name = "ata",
+        .path = "/boot/ata.elf",
+        .well_known_ep = 0,
+        .state = SVC_STOPPED,
+        .priority = 3,
+    },
+    /* Priority 4: Filesystem layer */
     {
         .name = "vfs",
         .path = "/boot/vfs.elf",
         .well_known_ep = EP_VFS,
         .state = SVC_STOPPED,
-        .priority = 2,
+        .priority = 4,
     },
-    /* Priority 2: RAM filesystem driver */
+    /* Priority 4: RAM filesystem driver */
     {
         .name = "ramfs",
         .path = "/boot/ramfs.elf",
-        .well_known_ep = 0,  /* No well-known endpoint */
+        .well_known_ep = 0,
         .state = SVC_STOPPED,
-        .priority = 2,
+        .priority = 4,
+    },
+    /* Priority 4: Ext2 filesystem driver */
+    {
+        .name = "ext2",
+        .path = "/boot/ext2.elf",
+        .well_known_ep = 0,
+        .state = SVC_STOPPED,
+        .priority = 4,
     },
     /* End marker */
     { .name = NULL }

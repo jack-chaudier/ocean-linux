@@ -286,4 +286,121 @@ struct vfs_dirent {
 #define FS_TRUNC            0x40D   /* Truncate file */
 #define FS_SYNC             0x40E   /* Sync to disk */
 
+/*
+ * Block Device Protocol (BLK server <-> drivers)
+ */
+
+/* Message labels */
+#define BLK_REGISTER        0x500   /* Register block device */
+#define BLK_UNREGISTER      0x501   /* Unregister block device */
+#define BLK_READ            0x502   /* Read blocks */
+#define BLK_WRITE           0x503   /* Write blocks */
+#define BLK_FLUSH           0x504   /* Flush to disk */
+#define BLK_GETINFO         0x505   /* Get device info */
+#define BLK_IOCTL           0x506   /* Device-specific control */
+
+/* Block device types */
+#define BLK_TYPE_UNKNOWN    0
+#define BLK_TYPE_ATA        1       /* ATA/IDE disk */
+#define BLK_TYPE_VIRTIO     2       /* VirtIO block device */
+#define BLK_TYPE_NVME       3       /* NVMe device */
+#define BLK_TYPE_RAM        4       /* RAM disk */
+
+/* Block device flags */
+#define BLK_FLAG_READONLY   (1 << 0)
+#define BLK_FLAG_REMOVABLE  (1 << 1)
+#define BLK_FLAG_PRESENT    (1 << 2)
+
+/* BLK_REGISTER request */
+struct blk_register_req {
+    uint32_t type;              /* Device type */
+    uint32_t flags;             /* Device flags */
+    uint64_t total_blocks;      /* Total blocks */
+    uint32_t block_size;        /* Block size in bytes */
+    char     name[32];          /* Device name */
+};
+
+/* BLK_REGISTER reply */
+struct blk_register_reply {
+    uint32_t dev_id;            /* Assigned device ID */
+};
+
+/* BLK_READ/BLK_WRITE request */
+struct blk_io_req {
+    uint32_t dev_id;            /* Device ID */
+    uint64_t start_block;       /* Starting block number */
+    uint32_t block_count;       /* Number of blocks */
+    uint64_t buffer_ptr;        /* Buffer address */
+};
+
+/* BLK_IO reply */
+struct blk_io_reply {
+    uint32_t blocks_done;       /* Blocks actually transferred */
+    uint32_t error;             /* Error code (0 = success) */
+};
+
+/* BLK_GETINFO request */
+struct blk_getinfo_req {
+    uint32_t dev_id;            /* Device ID */
+};
+
+/* BLK_GETINFO reply */
+struct blk_getinfo_reply {
+    uint32_t type;              /* Device type */
+    uint32_t flags;             /* Device flags */
+    uint64_t total_blocks;      /* Total blocks */
+    uint32_t block_size;        /* Block size */
+    char     name[32];          /* Device name */
+    char     model[40];         /* Model string */
+    char     serial[20];        /* Serial number */
+};
+
+/*
+ * ATA Driver Protocol
+ */
+
+/* ATA command results */
+#define ATA_OK              0
+#define ATA_ERR_TIMEOUT     1
+#define ATA_ERR_DEVICE      2
+#define ATA_ERR_IO          3
+#define ATA_ERR_NODEV       4
+
+/* ATA port I/O addresses */
+#define ATA_PRIMARY_IO      0x1F0
+#define ATA_PRIMARY_CTRL    0x3F6
+#define ATA_SECONDARY_IO    0x170
+#define ATA_SECONDARY_CTRL  0x376
+
+/* ATA registers (offset from base) */
+#define ATA_REG_DATA        0x00
+#define ATA_REG_ERROR       0x01
+#define ATA_REG_FEATURES    0x01
+#define ATA_REG_SECCOUNT    0x02
+#define ATA_REG_LBA_LO      0x03
+#define ATA_REG_LBA_MID     0x04
+#define ATA_REG_LBA_HI      0x05
+#define ATA_REG_DRIVE       0x06
+#define ATA_REG_STATUS      0x07
+#define ATA_REG_COMMAND     0x07
+
+/* ATA commands */
+#define ATA_CMD_READ_PIO    0x20
+#define ATA_CMD_READ_PIO_EXT 0x24
+#define ATA_CMD_WRITE_PIO   0x30
+#define ATA_CMD_WRITE_PIO_EXT 0x34
+#define ATA_CMD_IDENTIFY    0xEC
+#define ATA_CMD_FLUSH       0xE7
+#define ATA_CMD_FLUSH_EXT   0xEA
+
+/* ATA status bits */
+#define ATA_SR_BSY          0x80    /* Busy */
+#define ATA_SR_DRDY         0x40    /* Drive ready */
+#define ATA_SR_DF           0x20    /* Drive fault */
+#define ATA_SR_DSC          0x10    /* Drive seek complete */
+#define ATA_SR_DRQ          0x08    /* Data request */
+#define ATA_SR_CORR         0x04    /* Corrected data */
+#define ATA_SR_IDX          0x02    /* Index */
+#define ATA_SR_ERR          0x01    /* Error */
+
 #endif /* _OCEAN_IPC_PROTO_H */

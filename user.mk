@@ -6,6 +6,7 @@
 LIBC_DIR := lib/libc
 LIBOCEAN_DIR := lib/libocean
 SERVERS_DIR := servers
+DRIVERS_DIR := drivers
 FS_DIR := fs
 INCLUDE_DIR := include
 
@@ -47,9 +48,21 @@ PROC_OBJS := $(PROC_SRCS:$(SERVERS_DIR)/proc/%.c=$(BUILD_DIR)/servers/proc/%.o)
 VFS_SRCS := $(wildcard $(SERVERS_DIR)/vfs/*.c)
 VFS_OBJS := $(VFS_SRCS:$(SERVERS_DIR)/vfs/%.c=$(BUILD_DIR)/servers/vfs/%.o)
 
+# Block device server
+BLK_SRCS := $(wildcard $(SERVERS_DIR)/blk/*.c)
+BLK_OBJS := $(BLK_SRCS:$(SERVERS_DIR)/blk/%.c=$(BUILD_DIR)/servers/blk/%.o)
+
 # RAMFS driver
 RAMFS_SRCS := $(wildcard $(FS_DIR)/ramfs/*.c)
 RAMFS_OBJS := $(RAMFS_SRCS:$(FS_DIR)/ramfs/%.c=$(BUILD_DIR)/fs/ramfs/%.o)
+
+# Ext2 driver
+EXT2_SRCS := $(wildcard $(FS_DIR)/ext2/*.c)
+EXT2_OBJS := $(EXT2_SRCS:$(FS_DIR)/ext2/%.c=$(BUILD_DIR)/fs/ext2/%.o)
+
+# ATA driver
+ATA_SRCS := $(wildcard $(DRIVERS_DIR)/ata/*.c)
+ATA_OBJS := $(ATA_SRCS:$(DRIVERS_DIR)/ata/%.c=$(BUILD_DIR)/drivers/ata/%.o)
 
 # Userspace linker script
 USER_LD_SCRIPT := user.ld
@@ -59,7 +72,10 @@ SERVER_BINS := $(BUILD_DIR)/init.elf \
                $(BUILD_DIR)/mem.elf \
                $(BUILD_DIR)/proc.elf \
                $(BUILD_DIR)/vfs.elf \
-               $(BUILD_DIR)/ramfs.elf
+               $(BUILD_DIR)/blk.elf \
+               $(BUILD_DIR)/ramfs.elf \
+               $(BUILD_DIR)/ext2.elf \
+               $(BUILD_DIR)/ata.elf
 
 # Build libc objects
 $(BUILD_DIR)/libc/%.o: $(LIBC_DIR)/src/%.c
@@ -96,9 +112,27 @@ $(BUILD_DIR)/servers/vfs/%.o: $(SERVERS_DIR)/vfs/%.c
 	@mkdir -p $(dir $@)
 	@$(CC) $(USER_CFLAGS) -c $< -o $@
 
+# Build block device server
+$(BUILD_DIR)/servers/blk/%.o: $(SERVERS_DIR)/blk/%.c
+	@echo "  CC [blk] $<"
+	@mkdir -p $(dir $@)
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
 # Build RAMFS driver
 $(BUILD_DIR)/fs/ramfs/%.o: $(FS_DIR)/ramfs/%.c
 	@echo "  CC [ramfs] $<"
+	@mkdir -p $(dir $@)
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
+# Build Ext2 driver
+$(BUILD_DIR)/fs/ext2/%.o: $(FS_DIR)/ext2/%.c
+	@echo "  CC [ext2] $<"
+	@mkdir -p $(dir $@)
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
+# Build ATA driver
+$(BUILD_DIR)/drivers/ata/%.o: $(DRIVERS_DIR)/ata/%.c
+	@echo "  CC [ata] $<"
 	@mkdir -p $(dir $@)
 	@$(CC) $(USER_CFLAGS) -c $< -o $@
 
@@ -125,9 +159,21 @@ $(BUILD_DIR)/proc.elf: $(PROC_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
 $(BUILD_DIR)/vfs.elf: $(VFS_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
 	$(call link_user_binary,$(VFS_OBJS))
 
+# Link block device server
+$(BUILD_DIR)/blk.elf: $(BLK_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(BLK_OBJS))
+
 # Link RAMFS driver
 $(BUILD_DIR)/ramfs.elf: $(RAMFS_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
 	$(call link_user_binary,$(RAMFS_OBJS))
+
+# Link Ext2 driver
+$(BUILD_DIR)/ext2.elf: $(EXT2_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(EXT2_OBJS))
+
+# Link ATA driver
+$(BUILD_DIR)/ata.elf: $(ATA_OBJS) $(LIBC_OBJS) $(USER_LD_SCRIPT)
+	$(call link_user_binary,$(ATA_OBJS))
 
 # Phony targets
 .PHONY: userspace
@@ -138,4 +184,4 @@ servers: $(SERVER_BINS)
 
 .PHONY: clean-user
 clean-user:
-	@rm -rf $(BUILD_DIR)/libc $(BUILD_DIR)/servers $(BUILD_DIR)/fs $(SERVER_BINS)
+	@rm -rf $(BUILD_DIR)/libc $(BUILD_DIR)/servers $(BUILD_DIR)/drivers $(BUILD_DIR)/fs $(SERVER_BINS)

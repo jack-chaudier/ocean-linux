@@ -114,7 +114,10 @@ $(ISO): $(BUILD_DIR)/$(KERNEL) $(SERVER_BINS) limine.conf
 	@cp $(BUILD_DIR)/mem.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/proc.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/vfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/blk.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/ramfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/ext2.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@cp $(BUILD_DIR)/ata.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp limine.conf $(ISO_DIR)/boot/
 	@# Try to find limine in common locations
 	@if [ -d "/usr/share/limine" ]; then \
