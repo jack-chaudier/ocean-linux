@@ -24,6 +24,9 @@ jobs:
             qemu-system-x86 \
             xorriso
 
+      - name: Fetch Limine boot files
+        run: make limine
+
       - name: Build
         run: make all-user -j"$(nproc)"
 
