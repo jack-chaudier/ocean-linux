@@ -253,6 +253,20 @@ compile_commands:
 	@echo "" >> compile_commands.json
 	@echo "]" >> compile_commands.json
 
+.PHONY: smoke
+smoke: $(ISO)
+	@echo "Running QEMU smoke checks..."
+	@./scripts/qemu_smoke.sh
+
+.PHONY: stress
+stress: $(ISO)
+	@echo "Running QEMU stress checks..."
+	@ITERATIONS=$${ITERATIONS:-5} ./scripts/qemu_stress.sh
+
+.PHONY: check
+check: all-user smoke
+	@echo "Validation check passed"
+
 # Help
 .PHONY: help
 help:
@@ -265,6 +279,9 @@ help:
 	@echo "  run-window       Run with serial on PTY (use screen to connect)"
 	@echo "  debug            Run in QEMU with GDB server"
 	@echo "  run-kernel       Run kernel directly (no ISO)"
+	@echo "  smoke            Run deterministic QEMU smoke checks"
+	@echo "  stress           Run repeated QEMU smoke checks"
+	@echo "  check            Build and run smoke checks"
 	@echo "  clean            Remove build artifacts"
 	@echo "  limine           Download Limine bootloader"
 	@echo "  info             Show build configuration"
