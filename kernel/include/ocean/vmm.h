@@ -238,6 +238,10 @@ int vmm_mprotect(struct address_space *as, u64 addr, u64 size, u32 prot);
 /* Handle a page fault */
 int vmm_page_fault(u64 fault_addr, u64 error_code);
 
+/* Track current CPU's active address space for fault handling */
+void vmm_set_current(struct address_space *as);
+struct address_space *vmm_get_current(void);
+
 /*
  * Kernel Heap (kmalloc/kfree)
  */

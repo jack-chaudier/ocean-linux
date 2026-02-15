@@ -57,6 +57,9 @@ sudo apt install gcc-x86-64-linux-gnu nasm xorriso qemu-system-x86
 # Build bootable ISO
 make
 
+# Build kernel + userspace + ISO explicitly
+make all-user
+
 # Run in QEMU
 make run
 
@@ -68,6 +71,11 @@ make clean
 
 # Show build configuration
 make info
+
+# Run deterministic validation gates
+make smoke
+make stress
+make check
 ```
 
 ## Project Structure
@@ -144,13 +152,21 @@ Ocean includes an interactive shell with the following built-in commands:
 
 External commands (like `ls`) are loaded from boot modules and executed via fork/exec.
 
+## Docs
+
+- [docs/STATUS.md](docs/STATUS.md) - Current snapshot and roadmap
+- [docs/CODEX_WORKFLOW.md](docs/CODEX_WORKFLOW.md) - Codex development workflow
+
 ## Development
 
 ### Running Tests
 
 ```bash
-# Run in QEMU with serial output
-make run
+# Build and run deterministic smoke test
+make check
+
+# Run stress loop (repeated boots)
+make stress
 
 # Debug with GDB
 make debug

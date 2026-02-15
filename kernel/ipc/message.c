@@ -15,6 +15,8 @@
 extern int kprintf(const char *fmt, ...);
 extern void *memcpy(void *dest, const void *src, size_t n);
 extern void *memset(void *s, int c, size_t n);
+extern void *kmalloc(size_t size);
+extern void kfree(void *ptr);
 
 /* Global IPC state */
 static u64 ipc_total_messages = 0;
@@ -59,33 +61,15 @@ static void copy_message(struct ipc_message *dst, struct ipc_message *src)
 /*
  * Find a waiting receiver on the endpoint
  */
-static struct thread *find_receiver(struct ipc_endpoint *ep)
+static struct ipc_wait *peek_waiter(struct list_head *queue)
 {
-    if (list_empty(&ep->recv_queue)) {
+    if (list_empty(queue)) {
         return NULL;
     }
 
-    struct list_head *node = ep->recv_queue.next;
+    struct list_head *node = queue->next;
     struct ipc_wait *wait = container_of(node, struct ipc_wait, wait_list);
-
-    /* The thread is embedded in thread_ipc which is part of a larger structure */
-    /* For now, we store the thread pointer in wait->partner */
-    return wait->partner;
-}
-
-/*
- * Find a waiting sender on the endpoint
- */
-static struct thread *find_sender(struct ipc_endpoint *ep)
-{
-    if (list_empty(&ep->send_queue)) {
-        return NULL;
-    }
-
-    struct list_head *node = ep->send_queue.next;
-    struct ipc_wait *wait = container_of(node, struct ipc_wait, wait_list);
-
-    return wait->partner;
+    return wait;
 }
 
 /*
@@ -97,7 +81,6 @@ static struct thread *find_sender(struct ipc_endpoint *ep)
 int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg)
 {
     struct thread *self = get_current();
-    struct thread *receiver;
     int result = IPC_OK;
 
     if (!ep || !msg) {
@@ -113,15 +96,14 @@ int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg)
     }
 
     /* Look for a waiting receiver */
-    receiver = find_receiver(ep);
+    struct ipc_wait *recv_wait = peek_waiter(&ep->recv_queue);
 
-    if (receiver) {
+    if (recv_wait) {
         /* Direct transfer - receiver is waiting */
-        struct ipc_wait *recv_wait = container_of(
-            ep->recv_queue.next, struct ipc_wait, wait_list);
+        struct thread *receiver = recv_wait->partner;
 
         /* Remove receiver from wait queue */
-        list_del(&recv_wait->wait_list);
+        list_del_init(&recv_wait->wait_list);
 
         /* Copy message to receiver's buffer */
         if (recv_wait->msg) {
@@ -147,26 +129,41 @@ int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg)
         return IPC_ERR_NOPARTNER;
     } else {
         /* Block and wait for receiver */
-        struct ipc_wait wait;
-        wait.endpoint = ep;
-        wait.msg = msg;
-        wait.partner = self;
-        wait.operation = IPC_OP_SEND;
-        wait.result = IPC_ERR_NOPARTNER;
-        INIT_LIST_HEAD(&wait.wait_list);
+        struct ipc_wait *wait = kmalloc(sizeof(*wait));
+        if (!wait) {
+            spin_unlock(&ep->lock);
+            return IPC_ERR_BUSY;
+        }
+
+        wait->endpoint = ep;
+        wait->msg = msg;
+        wait->partner = self;
+        wait->operation = IPC_OP_SEND;
+        wait->result = IPC_ERR_NOPARTNER;
+        INIT_LIST_HEAD(&wait->wait_list);
 
         /* Add to send queue */
-        list_add_tail(&wait.wait_list, &ep->send_queue);
+        list_add_tail(&wait->wait_list, &ep->send_queue);
 
         spin_unlock(&ep->lock);
 
         /* Sleep until a receiver arrives */
         kprintf("[ipc] Send: blocking TID %d\n", self->tid);
-        thread_sleep(&wait);
+        thread_sleep(wait);
+
+        /*
+         * Defensive cleanup for spurious wakeups: remove from queue if still linked.
+         */
+        spin_lock(&ep->lock);
+        if (!list_empty(&wait->wait_list)) {
+            list_del_init(&wait->wait_list);
+        }
+        spin_unlock(&ep->lock);
 
         /* Woken up - check result */
-        result = wait.result;
+        result = wait->result;
         kprintf("[ipc] Send: TID %d woke, result=%d\n", self->tid, result);
+        kfree(wait);
     }
 
     return result;
@@ -181,7 +178,6 @@ int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg)
 int ipc_recv(struct ipc_endpoint *ep, struct ipc_message *msg)
 {
     struct thread *self = get_current();
-    struct thread *sender;
     int result = IPC_OK;
 
     if (!ep || !msg) {
@@ -197,15 +193,14 @@ int ipc_recv(struct ipc_endpoint *ep, struct ipc_message *msg)
     }
 
     /* Look for a waiting sender */
-    sender = find_sender(ep);
+    struct ipc_wait *send_wait = peek_waiter(&ep->send_queue);
 
-    if (sender) {
+    if (send_wait) {
         /* Direct transfer - sender is waiting */
-        struct ipc_wait *send_wait = container_of(
-            ep->send_queue.next, struct ipc_wait, wait_list);
+        struct thread *sender = send_wait->partner;
 
         /* Remove sender from wait queue */
-        list_del(&send_wait->wait_list);
+        list_del_init(&send_wait->wait_list);
 
         /* Copy message from sender's buffer */
         if (send_wait->msg) {
@@ -230,26 +225,39 @@ int ipc_recv(struct ipc_endpoint *ep, struct ipc_message *msg)
         return IPC_ERR_NOPARTNER;
     } else {
         /* Block and wait for sender */
-        struct ipc_wait wait;
-        wait.endpoint = ep;
-        wait.msg = msg;
-        wait.partner = self;
-        wait.operation = IPC_OP_RECV;
-        wait.result = IPC_ERR_NOPARTNER;
-        INIT_LIST_HEAD(&wait.wait_list);
+        struct ipc_wait *wait = kmalloc(sizeof(*wait));
+        if (!wait) {
+            spin_unlock(&ep->lock);
+            return IPC_ERR_BUSY;
+        }
+
+        wait->endpoint = ep;
+        wait->msg = msg;
+        wait->partner = self;
+        wait->operation = IPC_OP_RECV;
+        wait->result = IPC_ERR_NOPARTNER;
+        INIT_LIST_HEAD(&wait->wait_list);
 
         /* Add to receive queue */
-        list_add_tail(&wait.wait_list, &ep->recv_queue);
+        list_add_tail(&wait->wait_list, &ep->recv_queue);
 
         spin_unlock(&ep->lock);
 
         /* Sleep until a sender arrives */
         kprintf("[ipc] Recv: blocking TID %d\n", self->tid);
-        thread_sleep(&wait);
+        thread_sleep(wait);
+
+        /* Defensive cleanup for spurious wakeups. */
+        spin_lock(&ep->lock);
+        if (!list_empty(&wait->wait_list)) {
+            list_del_init(&wait->wait_list);
+        }
+        spin_unlock(&ep->lock);
 
         /* Woken up - check result */
-        result = wait.result;
+        result = wait->result;
         kprintf("[ipc] Recv: TID %d woke, result=%d\n", self->tid, result);
+        kfree(wait);
     }
 
     return result;

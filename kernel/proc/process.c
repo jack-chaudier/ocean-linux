@@ -26,6 +26,10 @@ extern void ret_from_fork(void);
 static LIST_HEAD(process_list);
 static spinlock_t process_list_lock;
 
+/* Global thread list for channel-based wakeups */
+struct list_head all_threads = LIST_HEAD_INIT(all_threads);
+spinlock_t thread_list_lock;
+
 /* PID allocation bitmap */
 static u64 pid_bitmap[PID_MAX / 64];
 static spinlock_t pid_lock;
@@ -33,6 +37,56 @@ static pid_t next_pid = 1;
 
 /* Init process (PID 1) */
 struct process *init_process = NULL;
+
+/* Forward declarations */
+static void free_kernel_stack(void *stack);
+
+static void thread_global_add(struct thread *t)
+{
+    u64 flags;
+    spin_lock_irqsave(&thread_list_lock, &flags);
+    list_add_tail(&t->all_list, &all_threads);
+    spin_unlock_irqrestore(&thread_list_lock, flags);
+}
+
+static void thread_global_remove(struct thread *t)
+{
+    u64 flags;
+    spin_lock_irqsave(&thread_list_lock, &flags);
+    if (!list_empty(&t->all_list)) {
+        list_del_init(&t->all_list);
+    }
+    spin_unlock_irqrestore(&thread_list_lock, flags);
+}
+
+static void process_reap(struct process *child)
+{
+    if (!child) {
+        return;
+    }
+
+    if (child->main_thread) {
+        thread_global_remove(child->main_thread);
+        free_kernel_stack(child->main_thread->kernel_stack);
+        kfree(child->main_thread);
+        child->main_thread = NULL;
+    }
+
+    if (child->mm) {
+        vmm_destroy_address_space(child->mm);
+        child->mm = NULL;
+    }
+
+    u64 flags;
+    spin_lock_irqsave(&process_list_lock, &flags);
+    if (!list_empty(&child->proc_list)) {
+        list_del_init(&child->proc_list);
+    }
+    spin_unlock_irqrestore(&process_list_lock, flags);
+
+    free_pid(child->pid);
+    kfree(child);
+}
 
 /*
  * Allocate a new PID
@@ -129,8 +183,10 @@ void process_init(void)
     kprintf("Initializing process subsystem...\n");
 
     spin_init(&process_list_lock);
+    spin_init(&thread_list_lock);
     spin_init(&pid_lock);
     memset(pid_bitmap, 0, sizeof(pid_bitmap));
+    INIT_LIST_HEAD(&all_threads);
 
     /* Reserve PID 0 for kernel/idle */
     pid_bitmap[0] |= 1;
@@ -217,6 +273,25 @@ static void user_thread_start(void)
 }
 
 /*
+ * Kernel thread trampoline.
+ *
+ * The target function/argument are stored in r12/r13 in the saved context.
+ */
+static void kthread_entry(void)
+{
+    struct thread *t = current_thread;
+    int (*fn)(void *) = (int (*)(void *))t->context.r12;
+    void *arg = (void *)t->context.r13;
+
+    int rc = 0;
+    if (fn) {
+        rc = fn(arg);
+    }
+
+    thread_exit(rc);
+}
+
+/*
  * Create the main thread for a process
  */
 struct thread *process_create_main_thread(struct process *proc, u64 entry, u64 stack_top)
@@ -275,6 +350,7 @@ struct thread *process_create_main_thread(struct process *proc, u64 entry, u64 s
     INIT_LIST_HEAD(&t->run_list);
     INIT_LIST_HEAD(&t->thread_list);
     INIT_LIST_HEAD(&t->wait_list);
+    INIT_LIST_HEAD(&t->all_list);
 
     /* CPU affinity - allow all CPUs */
     t->cpu = 0;
@@ -290,6 +366,8 @@ struct thread *process_create_main_thread(struct process *proc, u64 entry, u64 s
     proc->nr_threads++;
     proc->main_thread = t;
     spin_unlock_irqrestore(&proc->lock, flags);
+
+    thread_global_add(t);
 
     return t;
 }
@@ -311,7 +389,12 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
     /* Create the thread */
     struct thread *t = kmalloc(sizeof(struct thread));
     if (!t) {
-        /* TODO: cleanup proc */
+        u64 flags;
+        spin_lock_irqsave(&process_list_lock, &flags);
+        list_del_init(&proc->proc_list);
+        spin_unlock_irqrestore(&process_list_lock, flags);
+        free_pid(proc->pid);
+        kfree(proc);
         return NULL;
     }
 
@@ -332,6 +415,12 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
     t->kernel_stack = alloc_kernel_stack();
     if (!t->kernel_stack) {
         kfree(t);
+        u64 flags;
+        spin_lock_irqsave(&process_list_lock, &flags);
+        list_del_init(&proc->proc_list);
+        spin_unlock_irqrestore(&process_list_lock, flags);
+        free_pid(proc->pid);
+        kfree(proc);
         return NULL;
     }
     t->kernel_stack_size = KERNEL_STACK_SIZE;
@@ -349,19 +438,15 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
      * loaded by switch_context.
      */
     t->context.rsp = kstack_top - 8;
-    t->context.rip = (u64)fn;  /* Will "return" here */
+    t->context.rip = (u64)kthread_entry;
     t->context.rbp = 0;
-
-    /* Store arg in a callee-saved register that gets restored */
-    /* We'll pass arg via r12, and the thread function gets it from there */
-    /* Actually, for kernel threads, we need a wrapper. For now, simple approach: */
-    /* The function will be called directly. arg is not easily passed. */
-    /* TODO: Implement proper kthread entry wrapper */
-    (void)arg;
+    t->context.r12 = (u64)fn;
+    t->context.r13 = (u64)arg;
 
     INIT_LIST_HEAD(&t->run_list);
     INIT_LIST_HEAD(&t->thread_list);
     INIT_LIST_HEAD(&t->wait_list);
+    INIT_LIST_HEAD(&t->all_list);
 
     t->cpu = 0;
     t->cpu_mask = ~0ULL;
@@ -374,6 +459,8 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
     proc->nr_threads++;
     proc->main_thread = t;
     spin_unlock_irqrestore(&proc->lock, flags);
+
+    thread_global_add(t);
 
     return t;
 }
@@ -460,9 +547,11 @@ void thread_exit(int code)
     /* Remove from process */
     u64 flags;
     spin_lock_irqsave(&proc->lock, &flags);
-    list_del(&t->thread_list);
+    list_del_init(&t->thread_list);
     proc->nr_threads--;
     spin_unlock_irqrestore(&proc->lock, flags);
+
+    thread_global_remove(t);
 
     /* If last thread, process exits too - become zombie and wake parent */
     if (proc->nr_threads == 0) {
@@ -471,11 +560,8 @@ void thread_exit(int code)
 
         /* Wake up parent if it's waiting */
         struct process *parent = proc->parent;
-        if (parent && parent->main_thread) {
-            if (parent->main_thread->state == TASK_INTERRUPTIBLE) {
-                parent->main_thread->state = TASK_RUNNING;
-                sched_add(parent->main_thread);
-            }
+        if (parent) {
+            thread_wakeup(parent);
         }
     } else {
         t->state = TASK_DEAD;
@@ -504,6 +590,25 @@ void process_exit(int code)
     }
 
     proc->exit_code = code;
+
+    /*
+     * Reparent children to init so someone can always reap them.
+     */
+    if (init_process && init_process != proc) {
+        u64 flags, init_flags;
+        spin_lock_irqsave(&proc->lock, &flags);
+        while (!list_empty(&proc->children)) {
+            struct process *child = list_first_entry(&proc->children,
+                                                     struct process, sibling);
+            list_del_init(&child->sibling);
+            child->parent = init_process;
+
+            spin_lock_irqsave(&init_process->lock, &init_flags);
+            list_add_tail(&child->sibling, &init_process->children);
+            spin_unlock_irqrestore(&init_process->lock, init_flags);
+        }
+        spin_unlock_irqrestore(&proc->lock, flags);
+    }
 
     /* TODO:
      * - Terminate all threads
@@ -553,7 +658,12 @@ pid_t process_fork(void)
     if (parent->mm) {
         child->mm = vmm_clone_address_space(parent->mm);
         if (!child->mm) {
-            /* TODO: cleanup child */
+            spin_lock_irqsave(&parent->lock, &flags);
+            if (!list_empty(&child->sibling)) {
+                list_del_init(&child->sibling);
+            }
+            spin_unlock_irqrestore(&parent->lock, flags);
+            process_reap(child);
             return -1;
         }
     }
@@ -561,7 +671,12 @@ pid_t process_fork(void)
     /* Create child's main thread as copy of parent thread */
     struct thread *child_thread = kmalloc(sizeof(struct thread));
     if (!child_thread) {
-        /* TODO: cleanup */
+        spin_lock_irqsave(&parent->lock, &flags);
+        if (!list_empty(&child->sibling)) {
+            list_del_init(&child->sibling);
+        }
+        spin_unlock_irqrestore(&parent->lock, flags);
+        process_reap(child);
         return -1;
     }
 
@@ -572,6 +687,12 @@ pid_t process_fork(void)
     child_thread->kernel_stack = alloc_kernel_stack();
     if (!child_thread->kernel_stack) {
         kfree(child_thread);
+        spin_lock_irqsave(&parent->lock, &flags);
+        if (!list_empty(&child->sibling)) {
+            list_del_init(&child->sibling);
+        }
+        spin_unlock_irqrestore(&parent->lock, flags);
+        process_reap(child);
         return -1;
     }
 
@@ -595,6 +716,7 @@ pid_t process_fork(void)
     INIT_LIST_HEAD(&child_thread->run_list);
     INIT_LIST_HEAD(&child_thread->thread_list);
     INIT_LIST_HEAD(&child_thread->wait_list);
+    INIT_LIST_HEAD(&child_thread->all_list);
 
     /* Set up context so child returns from fork with 0 */
     /* The context's RIP should point to ret_from_fork */
@@ -646,6 +768,8 @@ pid_t process_fork(void)
     child->main_thread = child_thread;
     spin_unlock_irqrestore(&child->lock, flags);
 
+    thread_global_add(child_thread);
+
     /* Add child thread to scheduler */
     child_thread->flags &= ~TF_FORKING;
     sched_add(child_thread);
@@ -660,8 +784,7 @@ pid_t process_fork(void)
 pid_t process_wait(int *status)
 {
     struct process *proc = get_current_process();
-    struct thread *t = current_thread;
-    if (!proc || !t) {
+    if (!proc || !current_thread) {
         return -1;
     }
 
@@ -687,24 +810,21 @@ retry:
                 }
 
                 /* Remove from children list */
-                list_del(&child->sibling);
+                list_del_init(&child->sibling);
 
                 spin_unlock_irqrestore(&proc->lock, flags);
 
-                /* Free child resources */
-                free_pid(pid);
+                process_reap(child);
 
                 return pid;
             }
         }
 
-        /* No zombie children - block and wait */
-        t->state = TASK_INTERRUPTIBLE;
         spin_unlock_irqrestore(&proc->lock, flags);
     }
 
-    /* Schedule away - child's exit will wake us */
-    schedule();
+    /* No zombie children - block until a child exits. */
+    thread_sleep(proc);
 
     /* We were woken up - check again for zombies */
     goto retry;

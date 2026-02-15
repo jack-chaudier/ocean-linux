@@ -132,8 +132,9 @@ static int handle_stack_growth(struct address_space *as, u64 fault_addr,
             }
         }
 
+        u64 added_pages = (vma->start - new_start) / PAGE_SIZE;
         vma->start = new_start;
-        as->total_vm += (vma->start - new_start) / PAGE_SIZE;
+        as->total_vm += added_pages;
 
         return 0;
     }

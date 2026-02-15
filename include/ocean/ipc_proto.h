@@ -9,6 +9,8 @@
 
 #include <stdint.h>
 
+#define IPC_PROTO_VERSION 2
+
 /*
  * Message tag format (64 bits):
  *   [63:44] Label      - User-defined message type (20 bits)

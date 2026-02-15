@@ -123,24 +123,37 @@ $(ISO): $(BUILD_DIR)/$(KERNEL) $(SERVER_BINS) limine.conf
 	@cp $(BUILD_DIR)/cat.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp $(BUILD_DIR)/ls.elf $(ISO_DIR)/boot/ 2>/dev/null || true
 	@cp limine.conf $(ISO_DIR)/boot/
-	@# Try to find limine in common locations
-	@if [ -d "/usr/share/limine" ]; then \
+	@# Try to find Limine boot files in common locations
+	@if [ -f "/usr/share/limine/limine-bios.sys" ] && \
+	     [ -f "/usr/share/limine/limine-bios-cd.bin" ] && \
+	     [ -f "/usr/share/limine/limine-uefi-cd.bin" ]; then \
 		cp /usr/share/limine/limine-bios.sys $(ISO_DIR)/boot/; \
 		cp /usr/share/limine/limine-bios-cd.bin $(ISO_DIR)/boot/; \
 		cp /usr/share/limine/limine-uefi-cd.bin $(ISO_DIR)/boot/; \
-	elif [ -d "limine" ]; then \
+	elif [ -f "limine/limine-bios.sys" ] && \
+	     [ -f "limine/limine-bios-cd.bin" ] && \
+	     [ -f "limine/limine-uefi-cd.bin" ]; then \
 		cp limine/limine-bios.sys $(ISO_DIR)/boot/; \
 		cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/; \
 		cp limine/limine-uefi-cd.bin $(ISO_DIR)/boot/; \
 	else \
-		echo "Warning: Limine not found, ISO may not be bootable"; \
+		echo "Error: Limine boot files not found."; \
+		echo "Run 'make limine' or install Limine files under /usr/share/limine."; \
+		exit 1; \
+	fi
+	@if ! command -v xorriso >/dev/null 2>&1; then \
+		echo "Error: xorriso not found. Install xorriso to build bootable ISOs."; \
+		exit 1; \
 	fi
 	@xorriso -as mkisofs -b boot/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		$(ISO_DIR) -o $@ 2>/dev/null || \
-		echo "Note: xorriso not found. Install it for ISO creation."
+		$(ISO_DIR) -o $@ 2>/dev/null
+	@if [ ! -f "$@" ]; then \
+		echo "Error: ISO creation failed; output file '$@' not found."; \
+		exit 1; \
+	fi
 	@if [ -f "/usr/bin/limine" ]; then \
 		limine bios-install $@ 2>/dev/null || true; \
 	elif [ -f "limine/limine" ]; then \
@@ -253,6 +266,20 @@ compile_commands:
 	@echo "" >> compile_commands.json
 	@echo "]" >> compile_commands.json
 
+.PHONY: smoke
+smoke: $(ISO)
+	@echo "Running QEMU smoke checks..."
+	@./scripts/qemu_smoke.sh
+
+.PHONY: stress
+stress: $(ISO)
+	@echo "Running QEMU stress checks..."
+	@ITERATIONS=$${ITERATIONS:-5} ./scripts/qemu_stress.sh
+
+.PHONY: check
+check: all-user smoke
+	@echo "Validation check passed"
+
 # Help
 .PHONY: help
 help:
@@ -265,6 +292,9 @@ help:
 	@echo "  run-window       Run with serial on PTY (use screen to connect)"
 	@echo "  debug            Run in QEMU with GDB server"
 	@echo "  run-kernel       Run kernel directly (no ISO)"
+	@echo "  smoke            Run deterministic QEMU smoke checks"
+	@echo "  stress           Run repeated QEMU smoke checks"
+	@echo "  check            Build and run smoke checks"
 	@echo "  clean            Remove build artifacts"
 	@echo "  limine           Download Limine bootloader"
 	@echo "  info             Show build configuration"
