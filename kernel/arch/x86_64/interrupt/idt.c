@@ -185,6 +185,12 @@ void idt_init(void)
  */
 void exception_handler(struct trap_frame *frame)
 {
+    if (frame->int_no == VEC_PAGE_FAULT) {
+        extern void page_fault_handler(u64 error_code);
+        page_fault_handler(frame->error_code);
+        return;
+    }
+
     const char *name = "Unknown";
 
     if (frame->int_no < 32) {

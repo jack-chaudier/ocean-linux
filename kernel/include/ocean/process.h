@@ -122,6 +122,7 @@ struct thread {
     /* Scheduler linkage */
     struct list_head run_list;      /* Link in run queue */
     struct list_head thread_list;   /* Link in process's thread list */
+    struct list_head all_list;      /* Link in global thread list */
 
     /* Wait queue */
     struct list_head wait_list;     /* Link in wait queue */

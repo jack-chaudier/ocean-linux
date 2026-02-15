@@ -315,6 +315,7 @@ int vmm_map_region(struct address_space *as, u64 start, u64 size, u32 flags)
 int vmm_unmap_region(struct address_space *as, u64 start, u64 size)
 {
     u64 end = start + size;
+    u64 unmapped_pages = 0;
 
     /* Find and remove affected VMAs */
     struct vm_area *vma, *tmp;
@@ -338,6 +339,7 @@ int vmm_unmap_region(struct address_space *as, u64 start, u64 size)
                 phys_addr_t phys = *pte & PTE_ADDR_MASK;
                 const struct boot_info *boot = get_boot_info();
                 free_page((void *)(phys + boot->hhdm_offset));
+                unmapped_pages++;
             }
             paging_unmap(as->pml4, addr);
         }
@@ -369,7 +371,11 @@ int vmm_unmap_region(struct address_space *as, u64 start, u64 size)
         }
     }
 
-    as->total_vm -= size / PAGE_SIZE;
+    if (as->total_vm >= unmapped_pages) {
+        as->total_vm -= unmapped_pages;
+    } else {
+        as->total_vm = 0;
+    }
 
     return 0;
 }
@@ -529,7 +535,9 @@ struct address_space *vmm_clone_address_space(struct address_space *src)
             void *new_page = get_free_page();
             if (!new_page) {
                 kprintf("[vmm] Failed to allocate page for fork\n");
-                continue;
+                vma_free(new_vma);
+                vmm_destroy_address_space(dst);
+                return NULL;
             }
 
             /* Convert to physical address */
@@ -544,6 +552,10 @@ struct address_space *vmm_clone_address_space(struct address_space *src)
             int ret = paging_map(dst->pml4, addr, new_phys, flags);
             if (ret != 0) {
                 kprintf("[vmm] Failed to map page at 0x%llx\n", addr);
+                free_page(new_page);
+                vma_free(new_vma);
+                vmm_destroy_address_space(dst);
+                return NULL;
             }
         }
 

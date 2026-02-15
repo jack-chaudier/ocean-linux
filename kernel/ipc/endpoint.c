@@ -51,7 +51,7 @@ struct ipc_endpoint *endpoint_create(struct process *owner, u32 flags)
     memset(ep, 0, sizeof(*ep));
 
     ep->id = alloc_endpoint_id();
-    ep->flags = flags;
+    ep->flags = flags | EP_FLAG_LISTED;
     ep->owner = owner;
     ep->refcount = 1;
 
@@ -80,16 +80,27 @@ void endpoint_destroy(struct ipc_endpoint *ep)
         return;
     }
 
+    bool remove_from_list = false;
+
     spin_lock(&ep->lock);
+
+    if (ep->flags & EP_FLAG_DEAD) {
+        spin_unlock(&ep->lock);
+        return;
+    }
 
     /* Mark as dead */
     ep->flags |= EP_FLAG_DEAD;
+    if (ep->flags & EP_FLAG_LISTED) {
+        ep->flags &= ~EP_FLAG_LISTED;
+        remove_from_list = true;
+    }
 
     /* Wake all senders with error */
     while (!list_empty(&ep->send_queue)) {
         struct list_head *node = ep->send_queue.next;
         struct ipc_wait *wait = container_of(node, struct ipc_wait, wait_list);
-        list_del(node);
+        list_del_init(node);
         wait->result = IPC_ERR_DEAD;
         if (wait->partner) {
             sched_wakeup(wait->partner);
@@ -100,7 +111,7 @@ void endpoint_destroy(struct ipc_endpoint *ep)
     while (!list_empty(&ep->recv_queue)) {
         struct list_head *node = ep->recv_queue.next;
         struct ipc_wait *wait = container_of(node, struct ipc_wait, wait_list);
-        list_del(node);
+        list_del_init(node);
         wait->result = IPC_ERR_DEAD;
         if (wait->partner) {
             sched_wakeup(wait->partner);
@@ -109,14 +120,21 @@ void endpoint_destroy(struct ipc_endpoint *ep)
 
     spin_unlock(&ep->lock);
 
-    /* Remove from global list */
-    spin_lock(&endpoint_list_lock);
-    list_del(&ep->list);
-    spin_unlock(&endpoint_list_lock);
+    if (remove_from_list) {
+        spin_lock(&endpoint_list_lock);
+        if (!list_empty(&ep->list)) {
+            list_del_init(&ep->list);
+        }
+        spin_unlock(&endpoint_list_lock);
 
-    kprintf("[ipc] Destroyed endpoint %u\n", ep->id);
+        /*
+         * Drop the list/owner reference from endpoint_create().
+         * Memory is actually freed when the final holder drops via endpoint_put().
+         */
+        endpoint_put(ep);
+    }
 
-    kfree(ep);
+    kprintf("[ipc] Endpoint %u marked dead\n", ep->id);
 }
 
 /*
@@ -132,7 +150,7 @@ struct ipc_endpoint *endpoint_get(u32 id)
     list_for_each(node, &endpoint_list) {
         struct ipc_endpoint *e = container_of(node, struct ipc_endpoint, list);
         if (e->id == id && !(e->flags & EP_FLAG_DEAD)) {
-            e->refcount++;
+            __atomic_fetch_add(&e->refcount, 1, __ATOMIC_RELAXED);
             ep = e;
             break;
         }
@@ -152,13 +170,10 @@ void endpoint_put(struct ipc_endpoint *ep)
         return;
     }
 
-    spin_lock(&ep->lock);
-    ep->refcount--;
-    int should_free = (ep->refcount == 0);
-    spin_unlock(&ep->lock);
-
-    if (should_free) {
-        endpoint_destroy(ep);
+    int refs = __atomic_sub_fetch(&ep->refcount, 1, __ATOMIC_ACQ_REL);
+    if (refs == 0) {
+        kprintf("[ipc] Destroyed endpoint %u\n", ep->id);
+        kfree(ep);
     }
 }
 
@@ -251,6 +266,7 @@ void ipc_dump_endpoint(struct ipc_endpoint *ep)
     if (ep->flags & EP_FLAG_REPLY) kprintf(" REPLY");
     if (ep->flags & EP_FLAG_NOTIFICATION) kprintf(" NOTIFICATION");
     if (ep->flags & EP_FLAG_DEAD) kprintf(" DEAD");
+    if (ep->flags & EP_FLAG_LISTED) kprintf(" LISTED");
     kprintf("\n");
 
     kprintf("  Refcount: %d\n", ep->refcount);

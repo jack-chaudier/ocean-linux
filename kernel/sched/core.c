@@ -267,6 +267,12 @@ void schedule(void)
     struct thread *next;
     u64 flags;
 
+    if (!prev) {
+        prev = rq->idle;
+        current_thread = prev;
+        rq->curr = prev;
+    }
+
     preempt_disable();
     spin_lock_irqsave(&rq->lock, &flags);
 
@@ -457,21 +463,23 @@ void thread_sleep(void *channel)
 
 void thread_wakeup(void *channel)
 {
-    /* Wake all threads sleeping on this channel */
-    /* This is a simple implementation that scans all run queues */
-    /* TODO: Use a hash table for efficiency */
-
-    struct run_queue *rq = this_rq();
-    if (!rq) return;
-
-    /* For now, just look at threads in the system */
-    /* In a real system we'd track sleeping threads separately */
+    /* Wake all threads sleeping on this channel. */
     extern struct list_head all_threads;
     extern spinlock_t thread_list_lock;
 
-    /* We can't easily iterate all threads without the list */
-    /* For now, this is a no-op - sched_wakeup handles direct wakeups */
-    (void)channel;
+    u64 flags;
+    spin_lock_irqsave(&thread_list_lock, &flags);
+
+    struct thread *t;
+    list_for_each_entry(t, &all_threads, all_list) {
+        if (t->wait_channel == channel &&
+            (t->state == TASK_INTERRUPTIBLE ||
+             t->state == TASK_UNINTERRUPTIBLE)) {
+            sched_wakeup(t);
+        }
+    }
+
+    spin_unlock_irqrestore(&thread_list_lock, flags);
 }
 
 /*

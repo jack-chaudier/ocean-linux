@@ -314,6 +314,7 @@ void paging_switch(struct address_space *as)
 {
     if (as && as->pml4_phys) {
         write_cr3(as->pml4_phys);
+        vmm_set_current(as);
     }
 }
 

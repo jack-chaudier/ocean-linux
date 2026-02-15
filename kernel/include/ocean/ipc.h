@@ -139,6 +139,7 @@ struct ipc_endpoint {
 #define EP_FLAG_REPLY       (1 << 1)    /* Reply endpoint */
 #define EP_FLAG_NOTIFICATION (1 << 2)   /* Notification endpoint */
 #define EP_FLAG_DEAD        (1 << 3)    /* Endpoint destroyed */
+#define EP_FLAG_LISTED      (1 << 4)    /* Present in global endpoint list */
 
 /*
  * IPC Wait state - saved when thread blocks on IPC

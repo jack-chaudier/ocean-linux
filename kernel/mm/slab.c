@@ -52,6 +52,14 @@ static spinlock_t cache_list_lock;
 static struct slab_cache *kmalloc_caches[KMALLOC_NUM_CACHES];
 static bool slab_initialized = false;
 
+static inline struct page *virt_to_page_meta(void *addr)
+{
+    if (!addr) {
+        return NULL;
+    }
+    return phys_to_page(virt_to_phys(addr));
+}
+
 /*
  * Get the slab structure from an object pointer
  */
@@ -119,6 +127,11 @@ static struct slab *slab_alloc_new(struct slab_cache *cache)
     }
     *freelist = NULL;
 
+    struct page *meta = virt_to_page_meta(page);
+    if (meta) {
+        page_set_flag(meta, PG_SLAB);
+    }
+
     cache->total_slabs++;
 
     return slab;
@@ -129,6 +142,10 @@ static struct slab *slab_alloc_new(struct slab_cache *cache)
  */
 static void slab_free_slab(struct slab *slab)
 {
+    struct page *meta = virt_to_page_meta(slab);
+    if (meta) {
+        page_clear_flag(meta, PG_SLAB);
+    }
     slab->cache->total_slabs--;
     free_page(slab);
 }
@@ -428,27 +445,29 @@ void kfree(void *ptr)
 {
     if (!ptr) return;
 
-    /* Check if this is a page-aligned large allocation */
-    if (((u64)ptr & (PAGE_SIZE - 1)) == 0) {
-        /* Could be a large allocation or a slab page */
-        struct slab *slab = (struct slab *)ptr;
-
-        /* Check if it looks like a slab */
-        if (slab->cache && slab->start) {
-            /* This is a slab - the object must be within it */
-            slab_free(slab->cache, ptr);
-            return;
-        }
-
-        /* Must be a large allocation */
-        free_page(ptr);
+    struct page *meta = virt_to_page_meta(ptr);
+    if (!meta) {
         return;
     }
 
-    /* Normal slab allocation */
-    struct slab *slab = obj_to_slab(ptr);
-    if (slab->cache) {
-        slab_free(slab->cache, ptr);
+    if (meta->flags & PG_SLAB) {
+        struct slab *slab = obj_to_slab(ptr);
+        if (slab->cache) {
+            slab_free(slab->cache, ptr);
+        }
+        return;
+    }
+
+    /* Large/page allocations are always page-aligned. */
+    if (((u64)ptr & (PAGE_SIZE - 1)) != 0) {
+        kprintf("kfree: non-slab pointer %p is not page-aligned\n", ptr);
+        return;
+    }
+
+    if ((meta->flags & PG_HEAD) && (meta->flags & PG_COMPOUND)) {
+        free_pages(ptr, meta->order);
+    } else {
+        free_page(ptr);
     }
 }
 
@@ -472,12 +491,17 @@ size_t ksize(void *ptr)
 {
     if (!ptr) return 0;
 
-    struct slab *slab = obj_to_slab(ptr);
-    if (slab->cache) {
+    struct page *meta = virt_to_page_meta(ptr);
+    if (meta && (meta->flags & PG_SLAB)) {
+        struct slab *slab = obj_to_slab(ptr);
         return slab->cache->obj_size;
     }
 
-    return PAGE_SIZE; /* Assume at least one page */
+    if (meta && (meta->flags & PG_HEAD) && (meta->flags & PG_COMPOUND)) {
+        return (size_t)(1UL << meta->order) * PAGE_SIZE;
+    }
+
+    return PAGE_SIZE;
 }
 
 /*

@@ -8,6 +8,7 @@
 #include <ocean/process.h>
 #include <ocean/sched.h>
 #include <ocean/ipc.h>
+#include <ocean/uaccess.h>
 #include <ocean/types.h>
 #include <ocean/defs.h>
 #include <ocean/boot.h>
@@ -15,8 +16,6 @@
 /* External functions */
 extern int kprintf(const char *fmt, ...);
 extern void *memset(void *s, int c, size_t n);
-extern size_t strlen(const char *s);
-extern int strcmp(const char *s1, const char *s2);
 extern char *strstr(const char *haystack, const char *needle);
 
 /* Assembly entry point */
@@ -86,13 +85,32 @@ static i64 sys_yield(void)
 /* SYS_DEBUG_PRINT - Debug print (for testing) */
 static i64 sys_debug_print(const char *msg, u64 len)
 {
-    /* TODO: Validate user pointer */
-    /* For now, just print directly (UNSAFE - for testing only) */
-    for (u64 i = 0; i < len && i < 256; i++) {
-        extern void serial_putc(char c);
-        serial_putc(msg[i]);
+    if (len == 0) {
+        return 0;
     }
-    return (i64)len;
+    if (!msg) {
+        return -EFAULT;
+    }
+
+    extern void serial_putc(char c);
+
+    char chunk[128];
+    u64 total = 0;
+    while (total < len) {
+        size_t n = (size_t)MIN((u64)sizeof(chunk), len - total);
+        int ret = copy_from_user(chunk, msg + total, n);
+        if (ret < 0) {
+            return (total > 0) ? (i64)total : ret;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            serial_putc(chunk[i]);
+        }
+
+        total += n;
+    }
+
+    return (i64)total;
 }
 
 /* SYS_READ - Read from file descriptor (minimal implementation) */
@@ -100,7 +118,13 @@ static i64 sys_read(int fd, char *buf, u64 count)
 {
     /* For now, only support stdin (fd 0) */
     if (fd != 0) {
-        return -1;  /* EBADF */
+        return -EBADF;
+    }
+    if (count == 0) {
+        return 0;
+    }
+    if (!buf) {
+        return -EFAULT;
     }
 
     extern int serial_getc(void);
@@ -123,19 +147,30 @@ static i64 sys_read(int fd, char *buf, u64 count)
             break;
         }
 
-        buf[i++] = (char)c;
+        char out = (char)c;
 
         /* Echo the character */
-        serial_putc((char)c);
+        serial_putc(out);
 
         /* Stop at newline */
         if (c == '\n' || c == '\r') {
             if (c == '\r') {
-                buf[i-1] = '\n';
+                out = '\n';
                 serial_putc('\n');
             }
+            int ret = copy_to_user(buf + i, &out, 1);
+            if (ret < 0) {
+                return (i > 0) ? (i64)i : ret;
+            }
+            i++;
             break;
         }
+
+        int ret = copy_to_user(buf + i, &out, 1);
+        if (ret < 0) {
+            return (i > 0) ? (i64)i : ret;
+        }
+        i++;
     }
 
     return (i64)i;
@@ -146,16 +181,34 @@ static i64 sys_write(int fd, const char *buf, u64 count)
 {
     /* For now, only support stdout (fd 1) and stderr (fd 2) */
     if (fd != 1 && fd != 2) {
-        return -1;  /* EBADF */
+        return -EBADF;
+    }
+    if (count == 0) {
+        return 0;
+    }
+    if (!buf) {
+        return -EFAULT;
     }
 
-    /* TODO: Validate user buffer pointer */
-    for (u64 i = 0; i < count; i++) {
-        extern void serial_putc(char c);
-        serial_putc(buf[i]);
+    extern void serial_putc(char c);
+
+    char chunk[128];
+    u64 total = 0;
+    while (total < count) {
+        size_t n = (size_t)MIN((u64)sizeof(chunk), count - total);
+        int ret = copy_from_user(chunk, buf + total, n);
+        if (ret < 0) {
+            return (total > 0) ? (i64)total : ret;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            serial_putc(chunk[i]);
+        }
+
+        total += n;
     }
 
-    return (i64)count;
+    return (i64)total;
 }
 
 /*
@@ -190,19 +243,25 @@ static i64 sys_exec(const char *path, char *const argv[], char *const envp[])
     (void)envp;
 
     if (!path) {
-        return -1;  /* EINVAL */
+        return -EINVAL;
+    }
+
+    char kpath[256];
+    int path_len = copy_string_from_user(kpath, sizeof(kpath), path);
+    if (path_len < 0) {
+        return path_len;
     }
 
     /* Find the module in boot modules */
-    struct cached_module *mod = find_boot_module(path);
+    struct cached_module *mod = find_boot_module(kpath);
     if (!mod) {
-        kprintf("exec: '%s' not found\n", path);
-        return -1;  /* ENOENT */
+        kprintf("exec: '%s' not found\n", kpath);
+        return -ENOENT;
     }
 
     /* Extract just the filename from path */
-    const char *name = path;
-    const char *p = path;
+    const char *name = kpath;
+    const char *p = kpath;
     while (*p) {
         if (*p == '/') {
             name = p + 1;
@@ -215,13 +274,26 @@ static i64 sys_exec(const char *path, char *const argv[], char *const envp[])
     exec_replace(mod->address, mod->size, name);
 
     /* exec_replace never returns on success */
-    return -1;
+    return -EIO;
 }
 
 /* SYS_WAIT - Wait for child process */
 static i64 sys_wait(int *status)
 {
-    return (i64)process_wait(status);
+    int kstatus = 0;
+    pid_t pid = process_wait(status ? &kstatus : NULL);
+    if (pid < 0) {
+        return (i64)pid;
+    }
+
+    if (status) {
+        int ret = copy_to_user(status, &kstatus, sizeof(kstatus));
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    return (i64)pid;
 }
 
 /*
@@ -244,13 +316,28 @@ static i64 sys_ipc_recv_impl(u32 ep_cap, u64 tag_ptr, u64 r1_ptr, u64 r2_ptr, u6
 
     int result = ipc_recv_fast(ep_cap, &tag, regs);
 
-    /* Copy results back to user pointers (TODO: validate pointers) */
+    /* Copy results back to user pointers */
     if (result == IPC_OK && tag_ptr) {
-        *(u64 *)tag_ptr = tag;
-        if (r1_ptr) *(u64 *)r1_ptr = regs[0];
-        if (r2_ptr) *(u64 *)r2_ptr = regs[1];
-        if (r3_ptr) *(u64 *)r3_ptr = regs[2];
-        if (r4_ptr) *(u64 *)r4_ptr = regs[3];
+        int ret = copy_to_user((void *)tag_ptr, &tag, sizeof(tag));
+        if (ret < 0) {
+            return ret;
+        }
+        if (r1_ptr) {
+            ret = copy_to_user((void *)r1_ptr, &regs[0], sizeof(regs[0]));
+            if (ret < 0) return ret;
+        }
+        if (r2_ptr) {
+            ret = copy_to_user((void *)r2_ptr, &regs[1], sizeof(regs[1]));
+            if (ret < 0) return ret;
+        }
+        if (r3_ptr) {
+            ret = copy_to_user((void *)r3_ptr, &regs[2], sizeof(regs[2]));
+            if (ret < 0) return ret;
+        }
+        if (r4_ptr) {
+            ret = copy_to_user((void *)r4_ptr, &regs[3], sizeof(regs[3]));
+            if (ret < 0) return ret;
+        }
     }
 
     return (i64)result;
@@ -281,6 +368,7 @@ static i64 sys_endpoint_destroy_impl(u32 ep_id)
     }
 
     endpoint_destroy(ep);
+    endpoint_put(ep);
     return 0;
 }
 
@@ -356,14 +444,14 @@ i64 syscall_dispatch(u64 nr, u64 arg1, u64 arg2, u64 arg3,
     /* Validate syscall number */
     if (nr >= NR_SYSCALLS) {
         kprintf("[syscall] Invalid syscall number: %llu\n", nr);
-        return -1;  /* ENOSYS */
+        return -ENOSYS;
     }
 
     /* Get handler */
     syscall_handler_t handler = syscall_table[nr];
     if (!handler) {
         kprintf("[syscall] Unimplemented syscall: %llu\n", nr);
-        return -1;  /* ENOSYS */
+        return -ENOSYS;
     }
 
     /* Call handler */
