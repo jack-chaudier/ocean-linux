@@ -132,6 +132,7 @@ struct ipc_endpoint {
 
     /* List linkage */
     struct list_head list;              /* Global endpoint list */
+    struct list_head owner_link;        /* Link in owner->owned_endpoints */
 };
 
 /* Endpoint flags */
@@ -236,9 +237,14 @@ void ipc_init(void);
 
 /* Endpoint operations */
 struct ipc_endpoint *endpoint_create(struct process *owner, u32 flags);
+struct ipc_endpoint *endpoint_create_well_known(struct process *owner,
+                                                u32 id, u32 flags);
 void endpoint_destroy(struct ipc_endpoint *ep);
 struct ipc_endpoint *endpoint_get(u32 id);
 void endpoint_put(struct ipc_endpoint *ep);
+
+/* Tear down every endpoint owned by proc. Called during process teardown. */
+void ipc_destroy_owned_by_process(struct process *proc);
 
 /* Core IPC operations */
 int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg);
@@ -280,6 +286,7 @@ i64 sys_ipc_reply(u64 tag, u64 r1, u64 r2, u64 r3, u64 r4);
 i64 sys_ipc_reply_recv(u32 ep_cap, u64 tag, u64 r1, u64 r2, u64 r3, u64 r4);
 
 i64 sys_endpoint_create(u32 flags);
+i64 sys_endpoint_create_well_known(u32 id, u32 flags);
 i64 sys_cap_copy(u32 dst_slot, u32 src_slot);
 i64 sys_cap_delete(u32 slot);
 

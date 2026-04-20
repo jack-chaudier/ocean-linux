@@ -77,6 +77,9 @@
 #define SYS_CAP_MINT        64
 #define SYS_CAP_REVOKE      65
 
+/* Explicit well-known endpoint claim (id in [EP_WKE_MIN, EP_WKE_MAX]) */
+#define SYS_ENDPOINT_CREATE_WKE 66
+
 /* Reserved / unimplemented notifications */
 #define SYS_NOTIFY_SIGNAL   70
 #define SYS_NOTIFY_WAIT     71
@@ -265,6 +268,16 @@ static inline int debug_print(const char *msg, uint64_t len)
 static inline int endpoint_create(uint32_t flags)
 {
     return (int)syscall1(SYS_ENDPOINT_CREATE, flags);
+}
+
+/*
+ * Claim a reserved well-known endpoint. Returns the endpoint id on success,
+ * or a negative IPC error (in particular -IPC_ERR_BUSY if already claimed).
+ * Id must lie in [EP_WKE_MIN, EP_WKE_MAX].
+ */
+static inline int endpoint_create_well_known(uint32_t id, uint32_t flags)
+{
+    return (int)syscall2(SYS_ENDPOINT_CREATE_WKE, id, flags);
 }
 
 static inline int endpoint_destroy(uint32_t ep_id)

@@ -49,6 +49,7 @@ extern pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name);
 extern void ipc_init(void);
 extern void ipc_dump_stats(void);
 extern void ipc_test(void);
+extern void ipc_test_wke(void);
 
 /* External symbols from linker script */
 extern char _bss_start[];
@@ -430,6 +431,9 @@ static void kernel_main(void)
 
     /* Test IPC between kernel threads */
     ipc_test();
+
+    /* Exercise the well-known endpoint claim/cleanup path */
+    ipc_test_wke();
 
     /* Dump scheduler stats */
     sched_dump_stats();

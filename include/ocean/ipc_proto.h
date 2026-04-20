@@ -50,7 +50,14 @@
 
 /*
  * Well-known endpoint IDs
+ *
+ * IDs in [EP_WKE_MIN, EP_WKE_MAX] are reserved for services to claim
+ * directly via endpoint_create_well_known(). Dynamic endpoint IDs are
+ * allocated above EP_WKE_MAX.
  */
+#define EP_WKE_MIN      1
+#define EP_WKE_MAX      15
+
 #define EP_INIT         1       /* Init server */
 #define EP_MEM          2       /* Memory server */
 #define EP_PROC         3       /* Process server */

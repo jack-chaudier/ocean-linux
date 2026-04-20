@@ -39,6 +39,9 @@ AS := nasm
 KERNEL_DIR := kernel
 BUILD_DIR := build
 ISO_DIR := $(BUILD_DIR)/iso_root
+# Top-level shared headers (protocol definitions used by both kernel and userspace).
+# Also referenced (and redefined) by user.mk so that file is usable standalone.
+INCLUDE_DIR := include
 
 # Compiler flags
 CFLAGS := -std=gnu11 -g \
@@ -55,6 +58,7 @@ CFLAGS := -std=gnu11 -g \
           -mcmodel=kernel \
           -Wall -Wextra \
           -I$(KERNEL_DIR)/include \
+          -I$(INCLUDE_DIR) \
           -DOCEAN_KERNEL
 
 CLANG ?= clang
@@ -96,6 +100,7 @@ KERNEL_STATIC_FLAGS := --target=$(STATIC_TARGET) \
                        -mno-red-zone \
                        $(STATIC_WARNINGS) \
                        -I$(KERNEL_DIR)/include \
+                       -I$(INCLUDE_DIR) \
                        -DOCEAN_KERNEL
 USER_STATIC_FLAGS := --target=$(STATIC_TARGET) \
                      -std=gnu11 -g \

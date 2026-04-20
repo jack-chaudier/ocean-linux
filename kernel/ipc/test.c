@@ -5,6 +5,7 @@
  */
 
 #include <ocean/ipc.h>
+#include <ocean/ipc_proto.h>
 #include <ocean/process.h>
 #include <ocean/sched.h>
 #include <ocean/types.h>
@@ -154,4 +155,69 @@ void ipc_test(void)
     ipc_dump_stats();
 
     kprintf("=== IPC Test Done ===\n\n");
+}
+
+/*
+ * Exercise the well-known endpoint claim path.
+ *
+ * Checks three things:
+ *   1. An out-of-range id is rejected.
+ *   2. A valid WKE claim succeeds and the endpoint is looked up by that id.
+ *   3. A second claim on the same id fails with the endpoint still live,
+ *      and after destruction the id can be re-claimed.
+ */
+void ipc_test_wke(void)
+{
+    kprintf("\n=== WKE Claim Test ===\n");
+
+    /* Out-of-range id should be refused. */
+    if (endpoint_create_well_known(NULL, EP_WKE_MAX + 1, 0)) {
+        kprintf("WKE test FAIL: out-of-range id was accepted\n");
+        return;
+    }
+
+    /* Claim a reserved id not yet used by any service (EP_RS + 1 = 8). */
+    const u32 probe_id = EP_RS + 1;
+    struct ipc_endpoint *first = endpoint_create_well_known(NULL, probe_id, 0);
+    if (!first) {
+        kprintf("WKE test FAIL: first claim of id %u failed\n", probe_id);
+        return;
+    }
+    if (first->id != probe_id) {
+        kprintf("WKE test FAIL: claim returned id %u, expected %u\n",
+                first->id, probe_id);
+        return;
+    }
+
+    /* Lookup must succeed and return the same endpoint. */
+    struct ipc_endpoint *looked = endpoint_get(probe_id);
+    if (!looked || looked != first) {
+        kprintf("WKE test FAIL: endpoint_get(%u) did not return the claim\n",
+                probe_id);
+        return;
+    }
+    endpoint_put(looked);
+
+    /* Contested claim must fail while the first is still live. */
+    struct ipc_endpoint *second = endpoint_create_well_known(NULL, probe_id, 0);
+    if (second) {
+        kprintf("WKE test FAIL: contested claim of id %u succeeded\n", probe_id);
+        return;
+    }
+
+    /* Destroy and re-claim. */
+    endpoint_destroy(first);
+    endpoint_put(first);
+
+    struct ipc_endpoint *third = endpoint_create_well_known(NULL, probe_id, 0);
+    if (!third) {
+        kprintf("WKE test FAIL: re-claim of id %u after destroy failed\n",
+                probe_id);
+        return;
+    }
+    endpoint_destroy(third);
+    endpoint_put(third);
+
+    kprintf("WKE test passed.\n");
+    kprintf("=== WKE Claim Test Done ===\n\n");
 }

@@ -9,6 +9,7 @@
 #include <ocean/process.h>
 #include <ocean/sched.h>
 #include <ocean/ipc.h>
+#include <ocean/ipc_proto.h>
 #include <ocean/uaccess.h>
 #include <ocean/types.h>
 #include <ocean/defs.h>
@@ -646,6 +647,28 @@ static i64 sys_endpoint_create_impl(u32 flags)
     return (i64)ep->id;
 }
 
+/* SYS_ENDPOINT_CREATE_WKE - Claim a reserved well-known endpoint ID */
+static i64 sys_endpoint_create_wke_impl(u32 id, u32 flags)
+{
+    struct process *proc = get_current_process();
+    if (!proc) {
+        return -IPC_ERR_INVALID;
+    }
+
+    if (id < EP_WKE_MIN || id > EP_WKE_MAX) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_endpoint *ep = endpoint_create_well_known(proc, id, flags);
+    if (!ep) {
+        /* Either OOM or id already taken; the userspace convention is that
+         * -IPC_ERR_BUSY signals a contested well-known slot. */
+        return -IPC_ERR_BUSY;
+    }
+
+    return (i64)ep->id;
+}
+
 /* SYS_ENDPOINT_DESTROY - Destroy an endpoint */
 static i64 sys_endpoint_destroy_impl(u32 ep_id)
 {
@@ -799,6 +822,16 @@ static i64 sys_ipc_recv_dispatch(u64 ep_cap, u64 tag_ptr, u64 r1_ptr,
     return sys_ipc_recv_impl((u32)ep_cap, tag_ptr, r1_ptr, r2_ptr, r3_ptr, r4_ptr);
 }
 
+static i64 sys_endpoint_create_wke_dispatch(u64 id, u64 flags, u64 arg3,
+                                            u64 arg4, u64 arg5, u64 arg6)
+{
+    (void)arg3;
+    (void)arg4;
+    (void)arg5;
+    (void)arg6;
+    return sys_endpoint_create_wke_impl((u32)id, (u32)flags);
+}
+
 static i64 sys_endpoint_create_dispatch(u64 flags, u64 arg2, u64 arg3,
                                         u64 arg4, u64 arg5, u64 arg6)
 {
@@ -860,6 +893,7 @@ static syscall_handler_t syscall_table[NR_SYSCALLS] = {
     /* IPC - Endpoints */
     [SYS_ENDPOINT_CREATE] = sys_endpoint_create_dispatch,
     [SYS_ENDPOINT_DESTROY] = sys_endpoint_destroy_dispatch,
+    [SYS_ENDPOINT_CREATE_WKE] = sys_endpoint_create_wke_dispatch,
 
     /* Debug */
     [SYS_DEBUG_PRINT]   = sys_debug_print_dispatch,

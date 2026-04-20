@@ -171,6 +171,9 @@ struct process {
     /* File descriptors (placeholder for future) */
     void *files;                    /* File descriptor table */
 
+    /* IPC endpoints owned by this process (destroyed on exit) */
+    struct list_head owned_endpoints;
+
     /* Process name */
     char name[16];                  /* Process name (comm) */
 

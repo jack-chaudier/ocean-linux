@@ -77,6 +77,9 @@
 #define SYS_CAP_MINT        64
 #define SYS_CAP_REVOKE      65
 
+/* Explicit well-known endpoint claim (id in [EP_WKE_MIN, EP_WKE_MAX]) */
+#define SYS_ENDPOINT_CREATE_WKE 66
+
 /* Reserved / unimplemented notifications */
 #define SYS_NOTIFY_SIGNAL   70
 #define SYS_NOTIFY_WAIT     71
