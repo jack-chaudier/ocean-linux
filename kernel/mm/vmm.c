@@ -34,14 +34,6 @@ extern void kernel_space_init(void);
 static struct slab_cache *vma_cache;
 static struct slab_cache *address_space_cache;
 
-/* Kernel heap state */
-static struct {
-    u64 base;           /* Virtual base of kernel heap */
-    u64 current;        /* Current allocation pointer */
-    u64 end;            /* End of kernel heap */
-    spinlock_t lock;
-} kheap;
-
 /*
  * Initialize VMM subsystem
  */

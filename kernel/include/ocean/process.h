@@ -209,6 +209,9 @@ void process_init(void);
 /* Create a new process */
 struct process *process_create(const char *name);
 
+/* Destroy a process during teardown or failed setup */
+void process_destroy(struct process *proc);
+
 /* Fork current process */
 pid_t process_fork(void);
 

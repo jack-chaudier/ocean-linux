@@ -57,6 +57,10 @@ CFLAGS := -std=gnu11 -g \
           -I$(KERNEL_DIR)/include \
           -DOCEAN_KERNEL
 
+CLANG ?= clang
+STATIC_TARGET := x86_64-unknown-none-elf
+STATIC_WARNINGS := -Wall -Wextra -Werror -Wno-unused-parameter
+
 # Assembler flags
 ASFLAGS := -f elf64 -g -F dwarf
 
@@ -77,6 +81,34 @@ KERNEL_OBJS := $(KERNEL_C_OBJS) $(KERNEL_ASM_OBJS)
 
 # Include userspace build rules
 include user.mk
+
+KERNEL_STATIC_FLAGS := --target=$(STATIC_TARGET) \
+                       -std=gnu11 -g \
+                       -ffreestanding \
+                       -fno-stack-protector \
+                       -fno-stack-check \
+                       -fno-pie \
+                       -fno-pic \
+                       -mno-80387 \
+                       -mno-mmx \
+                       -mno-sse \
+                       -mno-sse2 \
+                       -mno-red-zone \
+                       $(STATIC_WARNINGS) \
+                       -I$(KERNEL_DIR)/include \
+                       -DOCEAN_KERNEL
+USER_STATIC_FLAGS := --target=$(STATIC_TARGET) \
+                     -std=gnu11 -g \
+                     -ffreestanding \
+                     -fno-stack-protector \
+                     -fno-pie \
+                     -fPIC \
+                     -Wall -Wextra -Werror \
+                     -Wno-unused-function -Wno-unused-parameter \
+                     -I$(LIBC_DIR)/include \
+                     -I$(LIBOCEAN_DIR)/include \
+                     -I$(INCLUDE_DIR) \
+                     -nostdinc
 
 # Default target
 .PHONY: all
@@ -110,18 +142,11 @@ $(ISO): $(BUILD_DIR)/$(KERNEL) $(SERVER_BINS) limine.conf
 	@rm -rf $(ISO_DIR)
 	@mkdir -p $(ISO_DIR)/boot
 	@cp $(BUILD_DIR)/$(KERNEL) $(ISO_DIR)/boot/
-	@cp $(BUILD_DIR)/init.elf $(ISO_DIR)/boot/
-	@cp $(BUILD_DIR)/mem.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/proc.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/vfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/blk.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/ramfs.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/ext2.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/ata.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/sh.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/echo.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/cat.elf $(ISO_DIR)/boot/ 2>/dev/null || true
-	@cp $(BUILD_DIR)/ls.elf $(ISO_DIR)/boot/ 2>/dev/null || true
+	@for bin in $(SERVER_BINS); do \
+		if [ -f "$$bin" ]; then \
+			cp "$$bin" "$(ISO_DIR)/boot/"; \
+		fi; \
+	done
 	@cp limine.conf $(ISO_DIR)/boot/
 	@# Try to find Limine boot files in common locations
 	@if [ -f "/usr/share/limine/limine-bios.sys" ] && \
@@ -262,6 +287,14 @@ compile_commands:
 		echo "    \"command\": \"$(CC) $(CFLAGS) -c $$src\"," >> compile_commands.json; \
 		echo "    \"file\": \"$$src\"" >> compile_commands.json; \
 		echo -n "  }" >> compile_commands.json; \
+	done; \
+	for src in $(USER_C_SRCS); do \
+		if [ "$$first" = true ]; then first=false; else echo "," >> compile_commands.json; fi; \
+		echo "  {" >> compile_commands.json; \
+		echo "    \"directory\": \"$(shell pwd)\"," >> compile_commands.json; \
+		echo "    \"command\": \"$(CC) $(USER_CFLAGS) -c $$src\"," >> compile_commands.json; \
+		echo "    \"file\": \"$$src\"" >> compile_commands.json; \
+		echo -n "  }" >> compile_commands.json; \
 	done
 	@echo "" >> compile_commands.json
 	@echo "]" >> compile_commands.json
@@ -276,8 +309,49 @@ stress: $(ISO)
 	@echo "Running QEMU stress checks..."
 	@ITERATIONS=$${ITERATIONS:-5} ./scripts/qemu_stress.sh
 
+.PHONY: static-check
+static-check: static-check-kernel static-check-user static-check-asm
+	@echo "Static verification passed"
+
+.PHONY: static-check-kernel
+static-check-kernel:
+	@if ! command -v $(CLANG) >/dev/null 2>&1; then \
+		echo "Error: clang not found. Install clang to run static checks."; \
+		exit 1; \
+	fi
+	@for src in $(KERNEL_C_SRCS); do \
+		echo "  CLANG   $$src"; \
+		$(CLANG) $(KERNEL_STATIC_FLAGS) -fsyntax-only "$$src" || exit 1; \
+	done
+
+.PHONY: static-check-user
+static-check-user:
+	@if ! command -v $(CLANG) >/dev/null 2>&1; then \
+		echo "Error: clang not found. Install clang to run static checks."; \
+		exit 1; \
+	fi
+	@for src in $(USER_C_SRCS); do \
+		echo "  CLANG   $$src"; \
+		$(CLANG) $(USER_STATIC_FLAGS) -fsyntax-only "$$src" || exit 1; \
+	done
+
+.PHONY: static-check-asm
+static-check-asm:
+	@if ! command -v $(CLANG) >/dev/null 2>&1; then \
+		echo "Error: clang not found. Install clang to run static checks."; \
+		exit 1; \
+	fi
+	@for src in $(USER_ASM_SRCS); do \
+		echo "  CLANG   $$src"; \
+		$(CLANG) $(USER_STATIC_FLAGS) -c "$$src" -o /dev/null || exit 1; \
+	done
+	@for src in $(KERNEL_ASM_SRCS); do \
+		echo "  NASM    $$src"; \
+		$(AS) $(ASFLAGS) "$$src" -o /dev/null || exit 1; \
+	done
+
 .PHONY: check
-check: all-user smoke
+check: static-check all-user smoke
 	@echo "Validation check passed"
 
 # Help
@@ -292,9 +366,10 @@ help:
 	@echo "  run-window       Run with serial on PTY (use screen to connect)"
 	@echo "  debug            Run in QEMU with GDB server"
 	@echo "  run-kernel       Run kernel directly (no ISO)"
+	@echo "  static-check     Run portable clang/NASM verification"
 	@echo "  smoke            Run deterministic QEMU smoke checks"
 	@echo "  stress           Run repeated QEMU smoke checks"
-	@echo "  check            Build and run smoke checks"
+	@echo "  check            Run static, build, and smoke checks"
 	@echo "  clean            Remove build artifacts"
 	@echo "  limine           Download Limine bootloader"
 	@echo "  info             Show build configuration"

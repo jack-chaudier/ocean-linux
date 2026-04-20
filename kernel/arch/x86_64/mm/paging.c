@@ -258,24 +258,6 @@ pml4e_t *paging_create_pml4(void)
 }
 
 /*
- * Free page tables recursively
- */
-static void free_pt_recursive(u64 *table, int level)
-{
-    for (int i = 0; i < PT_ENTRIES; i++) {
-        if (table[i] & PTE_PRESENT) {
-            if (level > 0 && !(table[i] & PTE_HUGE)) {
-                /* Recurse into lower level */
-                u64 *lower = (u64 *)phys_to_virt_local(table[i] & PTE_ADDR_MASK);
-                free_pt_recursive(lower, level - 1);
-            }
-            /* Level 0 (PT) entries point to actual pages, don't free those here */
-        }
-    }
-    free_pt_page(table);
-}
-
-/*
  * Destroy a PML4 and all associated user-space page tables
  */
 void paging_destroy_pml4(pml4e_t *pml4)

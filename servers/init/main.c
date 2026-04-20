@@ -12,6 +12,7 @@
 #include <string.h>
 #include <ocean/syscall.h>
 #include <ocean/ipc_proto.h>
+#include <ocean/userspace_manifest.h>
 
 /* Version */
 #define INIT_VERSION "0.3.0"
@@ -30,6 +31,7 @@
 struct service {
     const char *name;           /* Service name */
     const char *path;           /* Binary path */
+    const char *summary;        /* Human-readable description */
     uint32_t    well_known_ep;  /* Well-known endpoint ID */
     int         state;          /* Current state */
     int         pid;            /* Process ID (if running) */
@@ -37,67 +39,8 @@ struct service {
     int         priority;       /* Start priority (lower = earlier) */
 };
 
-/* Core services - started in priority order */
-static struct service services[MAX_SERVICES] = {
-    /* Priority 0: Memory management (needed for everything) */
-    {
-        .name = "mem",
-        .path = "/boot/mem.elf",
-        .well_known_ep = EP_MEM,
-        .state = SVC_STOPPED,
-        .priority = 0,
-    },
-    /* Priority 1: Process management */
-    {
-        .name = "proc",
-        .path = "/boot/proc.elf",
-        .well_known_ep = EP_PROC,
-        .state = SVC_STOPPED,
-        .priority = 1,
-    },
-    /* Priority 2: Block device server */
-    {
-        .name = "blk",
-        .path = "/boot/blk.elf",
-        .well_known_ep = EP_BLK,
-        .state = SVC_STOPPED,
-        .priority = 2,
-    },
-    /* Priority 3: ATA disk driver */
-    {
-        .name = "ata",
-        .path = "/boot/ata.elf",
-        .well_known_ep = 0,
-        .state = SVC_STOPPED,
-        .priority = 3,
-    },
-    /* Priority 4: Filesystem layer */
-    {
-        .name = "vfs",
-        .path = "/boot/vfs.elf",
-        .well_known_ep = EP_VFS,
-        .state = SVC_STOPPED,
-        .priority = 4,
-    },
-    /* Priority 4: RAM filesystem driver */
-    {
-        .name = "ramfs",
-        .path = "/boot/ramfs.elf",
-        .well_known_ep = 0,
-        .state = SVC_STOPPED,
-        .priority = 4,
-    },
-    /* Priority 4: Ext2 filesystem driver */
-    {
-        .name = "ext2",
-        .path = "/boot/ext2.elf",
-        .well_known_ep = 0,
-        .state = SVC_STOPPED,
-        .priority = 4,
-    },
-    /* End marker */
-    { .name = NULL }
-};
+static struct service services[MAX_SERVICES];
+static int num_services = 0;
 
 static int init_endpoint = -1;
 static int num_running = 0;
@@ -130,19 +73,6 @@ static void init_logf(const char *fmt, const char *arg)
     printf("[init] ");
     printf(fmt, arg);
     printf("\n");
-}
-
-/*
- * Find service by name
- */
-static struct service *find_service(const char *name)
-{
-    for (int i = 0; i < MAX_SERVICES && services[i].name; i++) {
-        if (strcmp(services[i].name, name) == 0) {
-            return &services[i];
-        }
-    }
-    return NULL;
 }
 
 /*
@@ -202,7 +132,7 @@ static void start_all_services(void)
 
     /* Find maximum priority */
     int max_priority = 0;
-    for (int i = 0; i < MAX_SERVICES && services[i].name; i++) {
+    for (int i = 0; i < num_services; i++) {
         if (services[i].priority > max_priority) {
             max_priority = services[i].priority;
         }
@@ -212,7 +142,7 @@ static void start_all_services(void)
     for (int prio = 0; prio <= max_priority; prio++) {
         printf("[init] === Priority level %d ===\n", prio);
 
-        for (int i = 0; i < MAX_SERVICES && services[i].name; i++) {
+        for (int i = 0; i < num_services; i++) {
             if (services[i].priority == prio) {
                 start_service(&services[i]);
 
@@ -233,10 +163,10 @@ static void start_all_services(void)
 static void print_service_status(void)
 {
     printf("\n[init] Service Status:\n");
-    printf("  NAME     STATE     PID  ENDPOINT\n");
-    printf("  -------  --------  ---  --------\n");
+    printf("  NAME     STATE     PID  ENDPOINT  SUMMARY\n");
+    printf("  -------  --------  ---  --------  -----------------------------\n");
 
-    for (int i = 0; i < MAX_SERVICES && services[i].name; i++) {
+    for (int i = 0; i < num_services; i++) {
         const char *state_str;
         switch (services[i].state) {
             case SVC_STOPPED:  state_str = "stopped";  break;
@@ -247,11 +177,12 @@ static void print_service_status(void)
             default:           state_str = "unknown";  break;
         }
 
-        printf("  %-7s  %-8s  %-3d  %d\n",
+        printf("  %-7s  %-8s  %-3d  %-8d  %s\n",
                services[i].name,
                state_str,
                services[i].pid,
-               services[i].endpoint);
+               services[i].endpoint,
+               services[i].summary ? services[i].summary : "");
     }
     printf("\n");
 }
@@ -259,40 +190,46 @@ static void print_service_status(void)
 /*
  * Spawn the interactive shell
  */
-static void spawn_shell(void)
+static int spawn_shell(void)
 {
+    const struct ocean_boot_module_spec *shell =
+        ocean_find_boot_module_spec("sh");
+    char *shell_argv[] = { "sh", NULL };
+
+    if (!shell) {
+        init_log("Shell boot module not found in manifest");
+        return 1;
+    }
+
     init_log("Spawning shell...");
 
     int pid = fork();
-    printf("[init] fork() returned %d\n", pid);
-
     if (pid < 0) {
         init_log("Failed to fork for shell");
-        return;
+        return 1;
     }
 
     if (pid == 0) {
-        /* Child process */
-        printf("[init] CHILD: I am running! PID=%d\n", getpid());
-        printf("[init] CHILD: About to exec shell\n");
-        exec("/boot/sh.elf", NULL, NULL);
+        exec(shell->path, shell_argv, NULL);
         /* If exec returns, it failed */
-        printf("[init] exec shell failed!\n");
+        printf("[init] exec shell failed: %s\n", shell->path);
         _exit(1);
-    } else {
-        printf("[init] Shell spawned with PID %d\n", pid);
+    }
 
-        /* Parent waits for shell to exit */
-        int status;
-        while (1) {
-            int child_pid = wait(&status);
-            if (child_pid == pid) {
-                printf("[init] Shell exited with status %d\n", status);
-                break;
-            }
-            /* Keep waiting */
-            yield();
+    printf("[init] Shell spawned with PID %d\n", pid);
+
+    while (1) {
+        int status = 0;
+        int child_pid = wait(&status);
+        if (child_pid == pid) {
+            printf("[init] Shell exited with status %d\n", status);
+            return status;
         }
+        if (child_pid < 0) {
+            init_log("wait() failed while monitoring shell");
+            return 1;
+        }
+        yield();
     }
 }
 
@@ -309,22 +246,48 @@ static void main_loop(void)
 {
     init_log("Starting interactive shell");
 
-    /* Spawn shell - this will wait for it to exit */
-    spawn_shell();
+    for (int attempt = 0; attempt < 3; attempt++) {
+        int status = spawn_shell();
+        if (status == 0) {
+            init_log("Shell exited cleanly");
+            return;
+        }
 
-    init_log("Shell exited, restarting...");
+        printf("[init] Shell failed with status %d, restarting (%d/3)\n",
+               status, attempt + 1);
+    }
 
-    /* If shell exits, respawn it */
-    spawn_shell();
-
-    init_log("Main loop complete");
+    init_log("Shell exceeded restart budget");
 }
 
 /*
  * Initialize init server
  */
+static void load_service_manifest(void)
+{
+    memset(services, 0, sizeof(services));
+    num_services = 0;
+
+    for (size_t i = 0; i < OCEAN_SERVICE_SPEC_COUNT; i++) {
+        if (num_services >= MAX_SERVICES) {
+            init_log("Service manifest exceeds MAX_SERVICES");
+            break;
+        }
+
+        services[num_services].name = ocean_service_specs[i].name;
+        services[num_services].path = ocean_service_specs[i].path;
+        services[num_services].summary = ocean_service_specs[i].summary;
+        services[num_services].well_known_ep = ocean_service_specs[i].well_known_ep;
+        services[num_services].state = SVC_STOPPED;
+        services[num_services].priority = ocean_service_specs[i].priority;
+        num_services++;
+    }
+}
+
 static void init_init(void)
 {
+    load_service_manifest();
+
     /* Create our IPC endpoint */
     init_endpoint = endpoint_create(0);
     if (init_endpoint < 0) {
@@ -342,8 +305,8 @@ static void shutdown(void)
     init_log("Initiating shutdown...");
 
     /* Stop services in reverse priority order */
-    for (int i = MAX_SERVICES - 1; i >= 0; i--) {
-        if (services[i].name && services[i].state == SVC_RUNNING) {
+    for (int i = num_services - 1; i >= 0; i--) {
+        if (services[i].state == SVC_RUNNING) {
             init_logf("Stopping service: %s", services[i].name);
             services[i].state = SVC_STOPPED;
             /* TODO: Actually send shutdown signal to service */
@@ -368,6 +331,7 @@ int main(int argc, char **argv)
     init_init();
 
     start_all_services();
+    print_service_status();
 
     main_loop();
 

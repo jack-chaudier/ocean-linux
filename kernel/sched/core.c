@@ -48,11 +48,6 @@ static inline void bitmap_clear(u64 *bitmap, int bit)
     bitmap[bit / 64] &= ~(1ULL << (bit % 64));
 }
 
-static inline int bitmap_test(u64 *bitmap, int bit)
-{
-    return (bitmap[bit / 64] >> (bit % 64)) & 1;
-}
-
 /* Find first set bit (returns -1 if none) */
 static inline int bitmap_ffs(u64 *bitmap, int nbits)
 {

@@ -40,6 +40,18 @@
 #define SYS_WRITE           33
 #define SYS_LSEEK           34
 
+/* File operation flags / origins */
+#define O_RDONLY            0x0000
+#define O_WRONLY            0x0001
+#define O_RDWR              0x0002
+#define O_CREAT             0x0100
+#define O_TRUNC             0x0200
+#define O_APPEND            0x0400
+
+#define SEEK_SET            0
+#define SEEK_CUR            1
+#define SEEK_END            2
+
 /* IPC - Message Passing */
 #define SYS_IPC_SEND        50
 #define SYS_IPC_RECV        51
@@ -225,6 +237,21 @@ static inline int64_t write(int fd, const void *buf, uint64_t count)
 static inline int64_t read(int fd, void *buf, uint64_t count)
 {
     return syscall3(SYS_READ, fd, (int64_t)buf, count);
+}
+
+static inline int open(const char *path, uint64_t flags, uint64_t mode)
+{
+    return (int)syscall3(SYS_OPEN, (int64_t)path, flags, mode);
+}
+
+static inline int close(int fd)
+{
+    return (int)syscall1(SYS_CLOSE, fd);
+}
+
+static inline int64_t lseek(int fd, int64_t offset, int whence)
+{
+    return syscall3(SYS_LSEEK, fd, offset, whence);
 }
 
 static inline int debug_print(const char *msg, uint64_t len)
