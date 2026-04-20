@@ -98,7 +98,7 @@ struct vm_area {
     u64 start;                  /* Start virtual address */
     u64 end;                    /* End virtual address (exclusive) */
     u32 flags;                  /* VMA_* flags */
-    u32 page_prot;              /* Page protection (PTE flags) */
+    u64 page_prot;              /* Page protection (PTE flags, including NX) */
 
     /* For file-backed mappings */
     void *file;                 /* File object (future) */

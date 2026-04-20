@@ -49,6 +49,7 @@ struct address_space *vmm_get_current(void)
  */
 static int handle_cow_fault(struct address_space *as, u64 fault_addr, pte_t *pte)
 {
+    (void)as;
     phys_addr_t old_phys = *pte & PTE_ADDR_MASK;
 
     /* Allocate a new page */

@@ -29,6 +29,7 @@ USER_LDFLAGS := -nostdlib \
 # Userspace sources
 LIBC_SRCS := $(wildcard $(LIBC_DIR)/src/*.c)
 LIBC_ASM_SRCS := $(wildcard $(LIBC_DIR)/src/*.S)
+USER_ASM_SRCS := $(LIBC_ASM_SRCS)
 LIBC_OBJS := $(LIBC_SRCS:$(LIBC_DIR)/src/%.c=$(BUILD_DIR)/libc/%.o) \
              $(LIBC_ASM_SRCS:$(LIBC_DIR)/src/%.S=$(BUILD_DIR)/libc/%.o)
 
@@ -82,6 +83,20 @@ CAT_OBJS := $(CAT_SRCS:$(BIN_DIR)/%.c=$(BUILD_DIR)/bin/%.o)
 # Ls utility
 LS_SRCS := $(wildcard $(BIN_DIR)/ls.c)
 LS_OBJS := $(LS_SRCS:$(BIN_DIR)/%.c=$(BUILD_DIR)/bin/%.o)
+
+USER_C_SRCS := $(LIBC_SRCS) \
+               $(INIT_SRCS) \
+               $(MEM_SRCS) \
+               $(PROC_SRCS) \
+               $(VFS_SRCS) \
+               $(BLK_SRCS) \
+               $(RAMFS_SRCS) \
+               $(EXT2_SRCS) \
+               $(ATA_SRCS) \
+               $(SH_SRCS) \
+               $(ECHO_SRCS) \
+               $(CAT_SRCS) \
+               $(LS_SRCS)
 
 # Userspace linker script
 USER_LD_SCRIPT := user.ld

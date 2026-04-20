@@ -55,7 +55,7 @@ static int ipc_receiver_thread(void *arg)
     test_done = 1;
 
     /* Sleep forever - we're done (use static var as channel) */
-    thread_sleep(&test_done);
+    thread_sleep((void *)&test_done);
     return 0;
 }
 
@@ -95,7 +95,7 @@ static int ipc_sender_thread(void *arg)
     kprintf("[sender] Done\n");
 
     /* Sleep forever - we're done */
-    thread_sleep(&test_done);
+    thread_sleep((void *)&test_done);
     return 0;
 }
 

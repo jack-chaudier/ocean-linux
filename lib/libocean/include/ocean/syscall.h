@@ -10,7 +10,11 @@
 #include <stdint.h>
 
 /*
- * System Call Numbers (must match kernel)
+ * System Call Numbers
+ *
+ * Only a small bootstrap subset is implemented today. Reserved numbers are
+ * kept stable so future work does not reshuffle the ABI, but they currently
+ * return -ENOSYS.
  */
 
 /* Process control */
@@ -21,41 +25,59 @@
 #define SYS_GETPID          4
 #define SYS_GETPPID         5
 
-/* Thread control */
+/* Implemented thread control */
 #define SYS_YIELD           10
+
+/* Reserved / unimplemented thread control */
 #define SYS_SLEEP           11
 #define SYS_THREAD_CREATE   12
 #define SYS_THREAD_EXIT     13
 
-/* Memory management */
+/* Reserved / unimplemented memory management */
 #define SYS_BRK             20
 #define SYS_MMAP            21
 #define SYS_MUNMAP          22
 #define SYS_MPROTECT        23
 
-/* File operations */
+/* Bootstrap file operations: stdin/stdout plus read-only boot modules */
 #define SYS_OPEN            30
 #define SYS_CLOSE           31
 #define SYS_READ            32
 #define SYS_WRITE           33
 #define SYS_LSEEK           34
 
-/* IPC - Message Passing */
+/* File operation flags / origins */
+#define O_RDONLY            0x0000
+#define O_WRONLY            0x0001
+#define O_RDWR              0x0002
+#define O_CREAT             0x0100
+#define O_TRUNC             0x0200
+#define O_APPEND            0x0400
+
+#define SEEK_SET            0
+#define SEEK_CUR            1
+#define SEEK_END            2
+
+/* Implemented IPC */
 #define SYS_IPC_SEND        50
 #define SYS_IPC_RECV        51
+
+/* Reserved / unimplemented IPC */
 #define SYS_IPC_CALL        52
 #define SYS_IPC_REPLY       53
 #define SYS_IPC_REPLY_RECV  54
 
-/* IPC - Endpoints and Capabilities */
+/* Implemented endpoint management */
 #define SYS_ENDPOINT_CREATE 60
 #define SYS_ENDPOINT_DESTROY 61
+
+/* Reserved / unimplemented capability management */
 #define SYS_CAP_COPY        62
 #define SYS_CAP_DELETE      63
 #define SYS_CAP_MINT        64
 #define SYS_CAP_REVOKE      65
 
-/* IPC - Notifications */
+/* Reserved / unimplemented notifications */
 #define SYS_NOTIFY_SIGNAL   70
 #define SYS_NOTIFY_WAIT     71
 #define SYS_NOTIFY_POLL     72
@@ -195,26 +217,15 @@ static inline int fork(void)
     return (int)syscall0(SYS_FORK);
 }
 
-static inline int exec(const char *path, char *const argv[], char *const envp[])
-{
-    return (int)syscall3(SYS_EXEC, (int64_t)path, (int64_t)argv, (int64_t)envp);
-}
-
+/* exec currently supports argv only; envp is not wired up yet. */
 static inline int execv(const char *path, char *const argv[])
 {
-    return exec(path, argv, (char *const *)0);
+    return (int)syscall3(SYS_EXEC, (int64_t)path, (int64_t)argv, 0);
 }
 
 static inline int wait(int *status)
 {
     return (int)syscall1(SYS_WAIT, (int64_t)status);
-}
-
-static inline int waitpid(int pid, int *status, int options)
-{
-    (void)pid;      /* TODO: implement specific pid waiting */
-    (void)options;  /* TODO: implement options */
-    return wait(status);
 }
 
 static inline int64_t write(int fd, const void *buf, uint64_t count)
@@ -225,6 +236,21 @@ static inline int64_t write(int fd, const void *buf, uint64_t count)
 static inline int64_t read(int fd, void *buf, uint64_t count)
 {
     return syscall3(SYS_READ, fd, (int64_t)buf, count);
+}
+
+static inline int open(const char *path, uint64_t flags, uint64_t mode)
+{
+    return (int)syscall3(SYS_OPEN, (int64_t)path, flags, mode);
+}
+
+static inline int close(int fd)
+{
+    return (int)syscall1(SYS_CLOSE, fd);
+}
+
+static inline int64_t lseek(int fd, int64_t offset, int whence)
+{
+    return syscall3(SYS_LSEEK, fd, offset, whence);
 }
 
 static inline int debug_print(const char *msg, uint64_t len)

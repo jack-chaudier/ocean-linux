@@ -48,11 +48,6 @@ static inline void bitmap_clear(u64 *bitmap, int bit)
     bitmap[bit / 64] &= ~(1ULL << (bit % 64));
 }
 
-static inline int bitmap_test(u64 *bitmap, int bit)
-{
-    return (bitmap[bit / 64] >> (bit % 64)) & 1;
-}
-
 /* Find first set bit (returns -1 if none) */
 static inline int bitmap_ffs(u64 *bitmap, int nbits)
 {
@@ -136,6 +131,23 @@ static void rq_init(struct run_queue *rq, int cpu_id)
     memset(rq->bitmap, 0, sizeof(rq->bitmap));
 }
 
+static void enqueue_thread_locked(struct run_queue *rq, struct thread *t)
+{
+    int prio = t->priority;
+
+    if (!list_empty(&t->run_list)) {
+        return;
+    }
+
+    if (prio < 0) prio = 0;
+    if (prio >= MAX_PRIO) prio = MAX_PRIO - 1;
+
+    list_add_tail(&t->run_list, &rq->queue[prio]);
+    bitmap_set(rq->bitmap, prio);
+    rq->nr_running++;
+    t->cpu = rq->cpu_id;
+}
+
 /*
  * Add thread to run queue
  */
@@ -146,17 +158,8 @@ void sched_add(struct thread *t)
 
     spin_lock_irqsave(&rq->lock, &flags);
 
-    /* Add to appropriate priority queue */
-    int prio = t->priority;
-    if (prio < 0) prio = 0;
-    if (prio >= MAX_PRIO) prio = MAX_PRIO - 1;
-
-    list_add_tail(&t->run_list, &rq->queue[prio]);
-    bitmap_set(rq->bitmap, prio);
-    rq->nr_running++;
-
     t->state = TASK_RUNNING;
-    t->cpu = rq->cpu_id;
+    enqueue_thread_locked(rq, t);
 
     spin_unlock_irqrestore(&rq->lock, flags);
 }
@@ -242,8 +245,10 @@ void switch_to(struct thread *prev, struct thread *next)
      */
     if (next->kernel_stack) {
         extern void set_percpu_kernel_rsp(u64 rsp);
+        extern void tss_set_rsp0(u64 rsp0);
         u64 next_kstack_top = (u64)next->kernel_stack + next->kernel_stack_size - 8;
         set_percpu_kernel_rsp(next_kstack_top);
+        tss_set_rsp0((u64)next->kernel_stack + next->kernel_stack_size);
     }
 
     /* Update statistics */
@@ -278,10 +283,7 @@ void schedule(void)
 
     /* Put current thread back on run queue if it's still runnable */
     if (prev && prev->state == TASK_RUNNING && prev != rq->idle) {
-        int prio = prev->priority;
-        list_add_tail(&prev->run_list, &rq->queue[prio]);
-        bitmap_set(rq->bitmap, prio);
-        rq->nr_running++;
+        enqueue_thread_locked(rq, prev);
     }
 
     /* Pick next thread */
@@ -355,6 +357,15 @@ void sched_wakeup(struct thread *t)
 
     t->state = TASK_RUNNING;
     t->time_slice = DEFAULT_TIME_SLICE;
+
+    /*
+     * The current thread is already executing. If it gets woken before it
+     * reaches schedule(), let schedule() publish it onto the run queue once.
+     */
+    if (t == current_thread) {
+        return;
+    }
+
     sched_add(t);
 }
 

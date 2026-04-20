@@ -5,6 +5,7 @@
  */
 
 #include <ocean/process.h>
+#include <ocean/files.h>
 #include <ocean/sched.h>
 #include <ocean/vmm.h>
 #include <ocean/types.h>
@@ -59,10 +60,19 @@ static void thread_global_remove(struct thread *t)
     spin_unlock_irqrestore(&thread_list_lock, flags);
 }
 
-static void process_reap(struct process *child)
+void process_destroy(struct process *child)
 {
     if (!child) {
         return;
+    }
+
+    if (child->parent && !list_empty(&child->sibling)) {
+        u64 parent_flags;
+        spin_lock_irqsave(&child->parent->lock, &parent_flags);
+        if (!list_empty(&child->sibling)) {
+            list_del_init(&child->sibling);
+        }
+        spin_unlock_irqrestore(&child->parent->lock, parent_flags);
     }
 
     if (child->main_thread) {
@@ -70,6 +80,11 @@ static void process_reap(struct process *child)
         free_kernel_stack(child->main_thread->kernel_stack);
         kfree(child->main_thread);
         child->main_thread = NULL;
+    }
+
+    if (child->files) {
+        process_files_destroy((struct process_files *)child->files);
+        child->files = NULL;
     }
 
     if (child->mm) {
@@ -236,6 +251,13 @@ struct process *process_create(const char *name)
     /* Initialize process lock */
     spin_init(&proc->lock);
 
+    proc->files = process_files_create();
+    if (!proc->files) {
+        free_pid(proc->pid);
+        kfree(proc);
+        return NULL;
+    }
+
     /* Add to global process list */
     u64 flags;
     spin_lock_irqsave(&process_list_lock, &flags);
@@ -389,12 +411,7 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
     /* Create the thread */
     struct thread *t = kmalloc(sizeof(struct thread));
     if (!t) {
-        u64 flags;
-        spin_lock_irqsave(&process_list_lock, &flags);
-        list_del_init(&proc->proc_list);
-        spin_unlock_irqrestore(&process_list_lock, flags);
-        free_pid(proc->pid);
-        kfree(proc);
+        process_destroy(proc);
         return NULL;
     }
 
@@ -415,12 +432,7 @@ struct thread *kthread_create(int (*fn)(void *), void *arg, const char *name)
     t->kernel_stack = alloc_kernel_stack();
     if (!t->kernel_stack) {
         kfree(t);
-        u64 flags;
-        spin_lock_irqsave(&process_list_lock, &flags);
-        list_del_init(&proc->proc_list);
-        spin_unlock_irqrestore(&process_list_lock, flags);
-        free_pid(proc->pid);
-        kfree(proc);
+        process_destroy(proc);
         return NULL;
     }
     t->kernel_stack_size = KERNEL_STACK_SIZE;
@@ -561,7 +573,10 @@ void thread_exit(int code)
         /* Wake up parent if it's waiting */
         struct process *parent = proc->parent;
         if (parent) {
+            u64 parent_flags;
+            spin_lock_irqsave(&parent->lock, &parent_flags);
             thread_wakeup(parent);
+            spin_unlock_irqrestore(&parent->lock, parent_flags);
         }
     } else {
         t->state = TASK_DEAD;
@@ -582,6 +597,9 @@ void thread_exit(int code)
 void process_exit(int code)
 {
     struct process *proc = get_current_process();
+    struct address_space *old_mm = NULL;
+    struct process_files *old_files = NULL;
+
     if (!proc) {
         /* No process - just halt forever */
         for (;;) {
@@ -610,10 +628,26 @@ void process_exit(int code)
         spin_unlock_irqrestore(&proc->lock, flags);
     }
 
+    if (proc->files) {
+        old_files = (struct process_files *)proc->files;
+        proc->files = NULL;
+    }
+
+    if (proc->mm) {
+        old_mm = proc->mm;
+        proc->mm = NULL;
+        paging_switch(&kernel_space);
+    }
+
+    if (old_files) {
+        process_files_destroy(old_files);
+    }
+    if (old_mm) {
+        vmm_destroy_address_space(old_mm);
+    }
+
     /* TODO:
      * - Terminate all threads
-     * - Close all file descriptors
-     * - Release address space
      * - Reparent children to init
      * - Notify parent
      * - Become zombie
@@ -647,6 +681,15 @@ pid_t process_fork(void)
     child->pgid = parent->pgid;
     child->sid = parent->sid;
 
+    if (parent->files) {
+        process_files_destroy((struct process_files *)child->files);
+        child->files = process_files_clone((const struct process_files *)parent->files);
+        if (!child->files) {
+            process_destroy(child);
+            return -1;
+        }
+    }
+
     /* Set parent/child relationship */
     child->parent = parent;
     u64 flags;
@@ -658,12 +701,7 @@ pid_t process_fork(void)
     if (parent->mm) {
         child->mm = vmm_clone_address_space(parent->mm);
         if (!child->mm) {
-            spin_lock_irqsave(&parent->lock, &flags);
-            if (!list_empty(&child->sibling)) {
-                list_del_init(&child->sibling);
-            }
-            spin_unlock_irqrestore(&parent->lock, flags);
-            process_reap(child);
+            process_destroy(child);
             return -1;
         }
     }
@@ -671,12 +709,7 @@ pid_t process_fork(void)
     /* Create child's main thread as copy of parent thread */
     struct thread *child_thread = kmalloc(sizeof(struct thread));
     if (!child_thread) {
-        spin_lock_irqsave(&parent->lock, &flags);
-        if (!list_empty(&child->sibling)) {
-            list_del_init(&child->sibling);
-        }
-        spin_unlock_irqrestore(&parent->lock, flags);
-        process_reap(child);
+        process_destroy(child);
         return -1;
     }
 
@@ -687,12 +720,7 @@ pid_t process_fork(void)
     child_thread->kernel_stack = alloc_kernel_stack();
     if (!child_thread->kernel_stack) {
         kfree(child_thread);
-        spin_lock_irqsave(&parent->lock, &flags);
-        if (!list_empty(&child->sibling)) {
-            list_del_init(&child->sibling);
-        }
-        spin_unlock_irqrestore(&parent->lock, flags);
-        process_reap(child);
+        process_destroy(child);
         return -1;
     }
 
@@ -784,6 +812,8 @@ pid_t process_fork(void)
 pid_t process_wait(int *status)
 {
     struct process *proc = get_current_process();
+    struct thread *self = current_thread;
+
     if (!proc || !current_thread) {
         return -1;
     }
@@ -791,6 +821,10 @@ pid_t process_wait(int *status)
 retry:
     {
         u64 flags;
+        struct process *zombie = NULL;
+        pid_t pid = -1;
+        int exit_code = 0;
+
         spin_lock_irqsave(&proc->lock, &flags);
 
         /* First check if we have any children at all */
@@ -804,27 +838,36 @@ retry:
         list_for_each_entry(child, &proc->children, sibling) {
             if (child->main_thread &&
                 child->main_thread->state == TASK_ZOMBIE) {
-                pid_t pid = child->pid;
-                if (status) {
-                    *status = child->exit_code;
-                }
-
-                /* Remove from children list */
+                zombie = child;
+                pid = child->pid;
+                exit_code = child->exit_code;
                 list_del_init(&child->sibling);
-
-                spin_unlock_irqrestore(&proc->lock, flags);
-
-                process_reap(child);
-
-                return pid;
+                break;
             }
         }
 
+        if (zombie) {
+            spin_unlock_irqrestore(&proc->lock, flags);
+
+            if (status) {
+                *status = exit_code;
+            }
+
+            process_destroy(zombie);
+            return pid;
+        }
+
+        /*
+         * Arm the sleep while still holding proc->lock so a child cannot exit
+         * and miss our wait_channel publication.
+         */
+        self->wait_channel = proc;
+        self->state = TASK_INTERRUPTIBLE;
         spin_unlock_irqrestore(&proc->lock, flags);
     }
 
-    /* No zombie children - block until a child exits. */
-    thread_sleep(proc);
+    schedule();
+    self->wait_channel = NULL;
 
     /* We were woken up - check again for zombies */
     goto retry;
