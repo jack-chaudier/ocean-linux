@@ -51,7 +51,9 @@ int process_setup_ipc_window(struct process *proc)
     }
 
     phys_addr_t phys = paging_get_phys(proc->mm->pml4, OCEAN_IPC_WINDOW_VA);
-    if (!phys) {
+    /* Accept only a real frame: reject 0 (not mapped) and (phys_addr_t)-1
+     * (the paging_get_phys sentinel for a missing PTE). */
+    if (phys == 0 || phys == (phys_addr_t)-1) {
         vmm_unmap_region(proc->mm, OCEAN_IPC_WINDOW_VA, OCEAN_IPC_WINDOW_SIZE);
         return -1;
     }
@@ -65,6 +67,11 @@ int process_setup_ipc_window(struct process *proc)
  * a parent (fork). vmm_clone_address_space allocated a fresh page for the
  * cloned VMA; we just need to read back the new phys so call/reply can find
  * it. No-op if the parent had no window set up.
+ *
+ * paging_get_phys returns (phys_addr_t)-1 for an unmapped VA, NOT zero, so
+ * we have to filter the sentinel before storing. Otherwise a child forked
+ * from an address space without an IPC window would get an all-ones phys,
+ * and process_ipc_window_kva would happily hand out a bogus HHDM pointer.
  */
 void process_adopt_ipc_window(struct process *proc)
 {
@@ -73,6 +80,10 @@ void process_adopt_ipc_window(struct process *proc)
     }
 
     phys_addr_t phys = paging_get_phys(proc->mm->pml4, OCEAN_IPC_WINDOW_VA);
+    if (phys == (phys_addr_t)-1) {
+        proc->ipc_window_phys = 0;
+        return;
+    }
     proc->ipc_window_phys = (u64)phys;
 }
 

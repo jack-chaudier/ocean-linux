@@ -425,23 +425,36 @@ int ipc_call(struct ipc_endpoint *ep, struct ipc_message *msg)
     }
 
     /*
-     * The receiver has set ipc_reply_pending = 1 and ipc_reply_server via
-     * link_call. Now block until the reply arrives or the server dies.
+     * Block until the reply arrives or the server dies.
      *
-     * The state-first pattern: set INTERRUPTIBLE and set wait_channel
-     * BEFORE re-checking the condition. If a wake happens after the
-     * check and before schedule(), sched_wakeup flips us back to RUNNING
-     * so schedule() simply re-enqueues us and we loop again.
+     * The state transition and the condition check must be atomic with
+     * respect to ipc_reply's "write result, clear pending, wake" sequence,
+     * otherwise a wake that lands between the check and schedule() could
+     * race with our own schedule() path:
+     *
+     *   - enqueue_thread_locked already guards against a double list_add
+     *     (kernel/sched/core.c), so the run queue will not be corrupted
+     *     even in that race.
+     *   - but the loop would still need to re-observe the cleared pending
+     *     flag under a stable store ordering.
+     *
+     * Holding ipc_cc_lock across the check+state write gives us that
+     * ordering: ipc_reply cannot flip pending to 0 between our read and
+     * the state=INTERRUPTIBLE store, so after we release the lock either
+     * we will see pending==0 on the next iteration or ipc_reply has not
+     * yet run and will see state==INTERRUPTIBLE when it wakes us.
      */
     for (;;) {
-        self->state = TASK_INTERRUPTIBLE;
-        self->wait_channel = (void *)(uintptr_t)&self->ipc_reply_pending;
-
+        spin_lock(&ipc_cc_lock);
         if (!self->ipc_reply_pending) {
             self->state = TASK_RUNNING;
             self->wait_channel = NULL;
+            spin_unlock(&ipc_cc_lock);
             break;
         }
+        self->state = TASK_INTERRUPTIBLE;
+        self->wait_channel = (void *)(uintptr_t)&self->ipc_reply_pending;
+        spin_unlock(&ipc_cc_lock);
 
         schedule();
     }
@@ -516,9 +529,14 @@ int ipc_reply(struct ipc_message *msg)
         }
     }
     caller->ipc_reply_pending = 0;
-    spin_unlock(&ipc_cc_lock);
 
+    /* Keep ipc_cc_lock held across sched_wakeup so the caller's wait loop
+     * cannot sneak in between our pending-clear and the wake: either the
+     * caller is still waiting to take the lock (sees pending==0 on the
+     * next loop iteration) or already asleep (sched_wakeup flips the
+     * INTERRUPTIBLE state before we release). */
     sched_wakeup(caller);
+    spin_unlock(&ipc_cc_lock);
 
     kprintf("[ipc] Reply: TID %d -> TID %d (err=%d)\n",
             self->tid, caller->tid, slice_err);
@@ -556,12 +574,11 @@ void ipc_thread_cleanup(struct thread *t)
         return;
     }
 
-    struct thread *caller_to_wake = NULL;
-    struct thread *server_with_us = NULL;
-
     spin_lock(&ipc_cc_lock);
 
-    /* Case 1: we owe a reply. */
+    /* Case 1: we owe a reply. Wake the caller with IPC_ERR_DEAD while
+     * holding the lock so an interleaving ipc_call wait cannot race
+     * pending=0 against our wake. */
     if (t->ipc_caller) {
         struct thread *caller = t->ipc_caller;
         t->ipc_caller = NULL;
@@ -570,26 +587,22 @@ void ipc_thread_cleanup(struct thread *t)
         }
         caller->ipc_reply_result = IPC_ERR_DEAD;
         caller->ipc_reply_pending = 0;
-        caller_to_wake = caller;
+        sched_wakeup(caller);
     }
 
-    /* Case 2: we are waiting on a server. */
+    /* Case 2: we are waiting on a server. Null out the server's back
+     * pointer so a later ipc_reply on that server sees "no caller"
+     * instead of dereferencing our about-to-be-freed struct. */
     if (t->ipc_reply_server) {
         struct thread *server = t->ipc_reply_server;
         t->ipc_reply_server = NULL;
         if (server->ipc_caller == t) {
             server->ipc_caller = NULL;
-            server_with_us = server;
         }
     }
 
     t->ipc_reply_pending = 0;
     spin_unlock(&ipc_cc_lock);
-
-    if (caller_to_wake) {
-        sched_wakeup(caller_to_wake);
-    }
-    (void)server_with_us;
 }
 
 /*

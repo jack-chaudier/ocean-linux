@@ -661,6 +661,13 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name,
         return -1;
     }
 
+    /* Stash the old window phys so a failed window setup can restore the
+     * entire address-space identity, not just proc->mm. Without this a
+     * failed exec leaves proc running on the old mm with ipc_window_phys
+     * pointing at a nonexistent page, poisoning later MSG_FLAG_SLICE
+     * traffic on this process. */
+    u64 old_ipc_window_phys = proc->ipc_window_phys;
+
     old_mm = proc->mm;
     proc->mm = new_mm;
     proc->ipc_window_phys = 0;
@@ -668,6 +675,7 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name,
     if (process_setup_ipc_window(proc) != 0) {
         kprintf("exec: Failed to set up IPC window\n");
         proc->mm = old_mm;
+        proc->ipc_window_phys = old_ipc_window_phys;
         vmm_destroy_address_space(new_mm);
         return -1;
     }
