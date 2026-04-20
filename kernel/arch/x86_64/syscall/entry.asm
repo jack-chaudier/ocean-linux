@@ -82,6 +82,8 @@ syscall_entry_simple:
     mov r12, rdi                    ; Save arg1
     mov r13, rsi                    ; Save arg2
     mov r14, rdx                    ; Save arg3
+    mov r15, r8                     ; Save arg5
+    mov rbx, r9                     ; Save arg6
 
     ; Set up C call arguments
     mov rdi, rax                    ; arg0 = syscall number
@@ -89,17 +91,18 @@ syscall_entry_simple:
     mov rdx, r13                    ; arg2
     mov rcx, r14                    ; arg3
     mov r8, r10                     ; arg4 (was in R10 for syscall)
-    ; r9 already has arg5
-    ; arg6 would go on stack but we don't use 7-arg syscalls
+    mov r9, r15                     ; arg5
+    ; arg6 goes on the stack for the 7-argument C call
 
-    ; Align stack to 16 bytes (required by ABI)
-    sub rsp, 8
+    ; Align stack and provide space for arg6.
+    sub rsp, 16
+    mov [rsp], rbx
 
     ; Call the C dispatcher
     call syscall_dispatch
 
     ; Restore stack alignment
-    add rsp, 8
+    add rsp, 16
 
     ; Store return value in the saved RAX slot
     ; RAX slot is at offset [rsp + 14*8] after the general regs

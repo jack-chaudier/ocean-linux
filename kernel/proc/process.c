@@ -573,7 +573,10 @@ void thread_exit(int code)
         /* Wake up parent if it's waiting */
         struct process *parent = proc->parent;
         if (parent) {
+            u64 parent_flags;
+            spin_lock_irqsave(&parent->lock, &parent_flags);
             thread_wakeup(parent);
+            spin_unlock_irqrestore(&parent->lock, parent_flags);
         }
     } else {
         t->state = TASK_DEAD;
@@ -594,6 +597,9 @@ void thread_exit(int code)
 void process_exit(int code)
 {
     struct process *proc = get_current_process();
+    struct address_space *old_mm = NULL;
+    struct process_files *old_files = NULL;
+
     if (!proc) {
         /* No process - just halt forever */
         for (;;) {
@@ -622,10 +628,26 @@ void process_exit(int code)
         spin_unlock_irqrestore(&proc->lock, flags);
     }
 
+    if (proc->files) {
+        old_files = (struct process_files *)proc->files;
+        proc->files = NULL;
+    }
+
+    if (proc->mm) {
+        old_mm = proc->mm;
+        proc->mm = NULL;
+        paging_switch(&kernel_space);
+    }
+
+    if (old_files) {
+        process_files_destroy(old_files);
+    }
+    if (old_mm) {
+        vmm_destroy_address_space(old_mm);
+    }
+
     /* TODO:
      * - Terminate all threads
-     * - Close all file descriptors
-     * - Release address space
      * - Reparent children to init
      * - Notify parent
      * - Become zombie
@@ -790,6 +812,8 @@ pid_t process_fork(void)
 pid_t process_wait(int *status)
 {
     struct process *proc = get_current_process();
+    struct thread *self = current_thread;
+
     if (!proc || !current_thread) {
         return -1;
     }
@@ -829,8 +853,25 @@ retry:
         spin_unlock_irqrestore(&proc->lock, flags);
     }
 
-    /* No zombie children - block until a child exits. */
-    thread_sleep(proc);
+    /*
+     * No zombie children yet. Publish the wait channel while holding proc->lock
+     * so child exit cannot race past us and lose the wakeup.
+     */
+    {
+        u64 flags;
+
+        spin_lock_irqsave(&proc->lock, &flags);
+        if (list_empty(&proc->children)) {
+            spin_unlock_irqrestore(&proc->lock, flags);
+            return -1;
+        }
+        self->wait_channel = proc;
+        self->state = TASK_INTERRUPTIBLE;
+        spin_unlock_irqrestore(&proc->lock, flags);
+    }
+
+    schedule();
+    self->wait_channel = NULL;
 
     /* We were woken up - check again for zombies */
     goto retry;

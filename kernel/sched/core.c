@@ -237,8 +237,10 @@ void switch_to(struct thread *prev, struct thread *next)
      */
     if (next->kernel_stack) {
         extern void set_percpu_kernel_rsp(u64 rsp);
+        extern void tss_set_rsp0(u64 rsp0);
         u64 next_kstack_top = (u64)next->kernel_stack + next->kernel_stack_size - 8;
         set_percpu_kernel_rsp(next_kstack_top);
+        tss_set_rsp0((u64)next->kernel_stack + next->kernel_stack_size);
     }
 
     /* Update statistics */

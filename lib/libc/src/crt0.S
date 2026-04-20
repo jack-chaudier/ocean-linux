@@ -5,8 +5,9 @@
  * It sets up the environment and calls main().
  *
  * On entry from kernel:
- *   - RSP points to user stack
- *   - Stack contains: argc, argv[], envp[], auxv[]
+ *   - RSP points to the bootstrap user stack
+ *   - Stack contains: argc, argv[], NULL
+ *   - envp/auxv are not wired up yet
  *   - All registers are cleared except RSP
  */
 
@@ -24,13 +25,9 @@ _start:
      *   [RSP + 8]  = argv[0]
      *   ...
      *   [RSP + 8 + 8*argc] = NULL (end of argv)
-     *   [RSP + ...] = envp[0]
-     *   ...
-     *   NULL (end of envp)
-     *   auxv (auxiliary vector)
      *
-     * For now, we'll use a simplified layout:
-     *   argc = 0, argv = NULL, envp = NULL
+     * The current kernel does not provide envp or auxv yet, so
+     * crt0 passes envp = NULL to main().
      */
 
     /* Get argc from stack (or use 0 if not set up) */

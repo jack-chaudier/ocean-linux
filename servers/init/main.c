@@ -23,7 +23,7 @@
 /* Service states */
 #define SVC_STOPPED     0
 #define SVC_STARTING    1
-#define SVC_RUNNING     2
+#define SVC_PLANNED     2
 #define SVC_STOPPING    3
 #define SVC_FAILED      4
 
@@ -43,7 +43,7 @@ static struct service services[MAX_SERVICES];
 static int num_services = 0;
 
 static int init_endpoint = -1;
-static int num_running = 0;
+static int num_planned = 0;
 
 /*
  * Print startup banner
@@ -83,42 +83,23 @@ static void init_logf(const char *fmt, const char *arg)
  * 2. Create a new process with its own address space
  * 3. Start the process running
  *
- * For now, we just simulate service startup since
- * the kernel doesn't yet support dynamic process creation
- * beyond the init process.
+ * Today we only record the boot plan honestly. The server binaries are built,
+ * but they are not spawned here because only boot modules can currently be
+ * exec'd through the kernel bootstrap path.
  */
 static int start_service(struct service *svc)
 {
-    if (!svc || svc->state == SVC_RUNNING) {
+    if (!svc || svc->state == SVC_PLANNED) {
         return -1;
     }
 
-    init_logf("Starting service: %s", svc->name);
+    init_logf("Planning service: %s", svc->name);
     svc->state = SVC_STARTING;
+    svc->state = SVC_PLANNED;
+    num_planned++;
 
-    /* TODO: Actually spawn the service process
-     *
-     * This would involve:
-     * 1. Sending a spawn request to the process server (once it's running)
-     * 2. Or using a direct kernel syscall for early boot
-     *
-     * For now, simulate by creating an endpoint for the service
-     */
-
-    svc->endpoint = endpoint_create(0);
-    if (svc->endpoint < 0) {
-        printf("[init] Failed to create endpoint for %s\n", svc->name);
-        svc->state = SVC_FAILED;
-        return -1;
-    }
-
-    /* Simulate successful start */
-    svc->state = SVC_RUNNING;
-    svc->pid = 1 + num_running;  /* Fake PID for now */
-    num_running++;
-
-    printf("[init] Service '%s' started (simulated) with endpoint %d\n",
-           svc->name, svc->endpoint);
+    printf("[init] Service '%s' remains planned only; spawn path is not wired up yet\n",
+           svc->name);
 
     return 0;
 }
@@ -154,7 +135,7 @@ static void start_all_services(void)
         }
     }
 
-    printf("[init] All core services started (%d running)\n", num_running);
+    printf("[init] Core service plan recorded (%d planned, 0 spawned)\n", num_planned);
 }
 
 /*
@@ -163,25 +144,25 @@ static void start_all_services(void)
 static void print_service_status(void)
 {
     printf("\n[init] Service Status:\n");
-    printf("  NAME     STATE     PID  ENDPOINT  SUMMARY\n");
-    printf("  -------  --------  ---  --------  -----------------------------\n");
+    printf("  NAME     STATE     PID  WK-EP  SUMMARY\n");
+    printf("  -------  --------  ---  -----  -----------------------------\n");
 
     for (int i = 0; i < num_services; i++) {
         const char *state_str;
         switch (services[i].state) {
             case SVC_STOPPED:  state_str = "stopped";  break;
             case SVC_STARTING: state_str = "starting"; break;
-            case SVC_RUNNING:  state_str = "running";  break;
+            case SVC_PLANNED:  state_str = "planned";  break;
             case SVC_STOPPING: state_str = "stopping"; break;
             case SVC_FAILED:   state_str = "FAILED";   break;
             default:           state_str = "unknown";  break;
         }
 
-        printf("  %-7s  %-8s  %-3d  %-8d  %s\n",
+        printf("  %-7s  %-8s  %-3d  %-5u  %s\n",
                services[i].name,
                state_str,
                services[i].pid,
-               services[i].endpoint,
+               services[i].well_known_ep,
                services[i].summary ? services[i].summary : "");
     }
     printf("\n");
@@ -210,7 +191,7 @@ static int spawn_shell(void)
     }
 
     if (pid == 0) {
-        exec(shell->path, shell_argv, NULL);
+        execv(shell->path, shell_argv);
         /* If exec returns, it failed */
         printf("[init] exec shell failed: %s\n", shell->path);
         _exit(1);
@@ -267,6 +248,7 @@ static void load_service_manifest(void)
 {
     memset(services, 0, sizeof(services));
     num_services = 0;
+    num_planned = 0;
 
     for (size_t i = 0; i < OCEAN_SERVICE_SPEC_COUNT; i++) {
         if (num_services >= MAX_SERVICES) {
@@ -279,6 +261,8 @@ static void load_service_manifest(void)
         services[num_services].summary = ocean_service_specs[i].summary;
         services[num_services].well_known_ep = ocean_service_specs[i].well_known_ep;
         services[num_services].state = SVC_STOPPED;
+        services[num_services].pid = -1;
+        services[num_services].endpoint = -1;
         services[num_services].priority = ocean_service_specs[i].priority;
         num_services++;
     }
@@ -306,10 +290,9 @@ static void shutdown(void)
 
     /* Stop services in reverse priority order */
     for (int i = num_services - 1; i >= 0; i--) {
-        if (services[i].state == SVC_RUNNING) {
-            init_logf("Stopping service: %s", services[i].name);
+        if (services[i].state == SVC_PLANNED) {
+            init_logf("Clearing planned service: %s", services[i].name);
             services[i].state = SVC_STOPPED;
-            /* TODO: Actually send shutdown signal to service */
         }
     }
 

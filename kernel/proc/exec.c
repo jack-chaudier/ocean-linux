@@ -18,6 +18,7 @@ extern void *memset(void *s, int c, size_t n);
 extern void *memcpy(void *dest, const void *src, size_t n);
 extern void *kmalloc(size_t size);
 extern void kfree(void *ptr);
+extern size_t strlen(const char *s);
 
 /* From pmm.c */
 extern void *get_free_page(unsigned int gfp_flags);
@@ -30,6 +31,7 @@ extern void enter_usermode_from_syscall(u64 entry, u64 stack, u64 flags);
 
 /* From process.c */
 extern struct thread *process_create_main_thread(struct process *proc, u64 entry, u64 stack_top);
+extern struct process *init_process;
 
 /* From vmm.c */
 extern struct vm_area *vma_alloc(void);
@@ -50,7 +52,69 @@ extern struct thread *current_thread;
 /*
  * Load an ELF segment into the address space
  */
-static int load_segment(struct address_space *as, const void *elf_data,
+static int segment_overlaps(struct address_space *as, u64 start, u64 end)
+{
+    struct vm_area *vma;
+
+    list_for_each_entry(vma, &as->vma_list, list) {
+        if (vma->start < end && vma->end > start) {
+            return 1;
+        }
+        if (vma->start >= end) {
+            break;
+        }
+    }
+
+    return 0;
+}
+
+static void *user_ptr_to_kernel(struct address_space *as, u64 user_addr)
+{
+    const struct boot_info *boot = get_boot_info();
+    phys_addr_t phys = paging_get_phys(as->pml4, user_addr);
+
+    if (phys == (phys_addr_t)-1) {
+        return NULL;
+    }
+
+    return (void *)(phys + boot->hhdm_offset);
+}
+
+static int write_user_bytes(struct address_space *as, u64 user_addr,
+                            const void *src, size_t len)
+{
+    const u8 *bytes = (const u8 *)src;
+    size_t copied = 0;
+
+    while (copied < len) {
+        u64 addr = user_addr + copied;
+        size_t page_offset = (size_t)(addr & (PAGE_SIZE - 1));
+        size_t chunk = PAGE_SIZE - page_offset;
+        void *dst;
+
+        if (chunk > len - copied) {
+            chunk = len - copied;
+        }
+
+        dst = user_ptr_to_kernel(as, addr);
+        if (!dst) {
+            return -1;
+        }
+
+        memcpy(dst, bytes + copied, chunk);
+        copied += chunk;
+    }
+
+    return 0;
+}
+
+static int push_u64(struct address_space *as, u64 *sp, u64 value)
+{
+    *sp -= sizeof(value);
+    return write_user_bytes(as, *sp, &value, sizeof(value));
+}
+
+static int load_segment(struct address_space *as, const void *elf_data, size_t elf_size,
                         const Elf64_Phdr *phdr)
 {
     /* Only load PT_LOAD segments */
@@ -67,6 +131,24 @@ static int load_segment(struct address_space *as, const void *elf_data,
     u64 vaddr_aligned = vaddr & ~(PAGE_SIZE - 1);
     u64 offset_in_page = vaddr - vaddr_aligned;
     u64 memsz_aligned = (memsz + offset_in_page + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    if (memsz < filesz) {
+        kprintf("    Invalid ELF segment: filesz > memsz\n");
+        return -1;
+    }
+    if (offset > elf_size || filesz > elf_size - offset) {
+        kprintf("    Invalid ELF segment: file range out of bounds\n");
+        return -1;
+    }
+    if (vaddr_aligned >= USER_SPACE_END ||
+        memsz_aligned > USER_SPACE_END - vaddr_aligned) {
+        kprintf("    Invalid ELF segment: virtual address out of range\n");
+        return -1;
+    }
+    if (segment_overlaps(as, vaddr_aligned, vaddr_aligned + memsz_aligned)) {
+        kprintf("    Invalid ELF segment: overlapping PT_LOAD range\n");
+        return -1;
+    }
 
     /* Determine page flags */
     u64 flags = PTE_PRESENT | PTE_USER;
@@ -164,11 +246,12 @@ static int load_segment(struct address_space *as, const void *elf_data,
 /*
  * Set up user stack
  */
-static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
-                            char **envp)
+static u64 setup_user_stack(struct address_space *as, const char *const argv[])
 {
     const struct boot_info *boot = get_boot_info();
     u64 hhdm = boot->hhdm_offset;
+    u64 arg_addrs[32];
+    int argc = 0;
 
     /* Allocate stack pages */
     u64 stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
@@ -187,33 +270,7 @@ static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
         paging_map(as->pml4, addr, phys_addr, flags);
     }
 
-    /* Set up initial stack layout:
-     *
-     * High addresses:
-     *   ...
-     *   NULL (end of envp)
-     *   envp[n]
-     *   ...
-     *   envp[0]
-     *   NULL (end of argv)
-     *   argv[argc-1]
-     *   ...
-     *   argv[0]
-     *   argc
-     * Low addresses (RSP points here)
-     *
-     * For simplicity, we'll just set up argc=0 initially
-     */
-
-    u64 sp = USER_STACK_TOP - 8;
-
-    /* We can't easily write to user stack from here since it's in
-     * a different address space. For now, just return stack pointer.
-     * The entry code will need to handle this properly. */
-
-    (void)argc;
-    (void)argv;
-    (void)envp;
+    u64 sp = USER_STACK_TOP;
 
     /* Create VMA for the stack */
     struct vm_area *stack_vma = vma_alloc();
@@ -229,6 +286,37 @@ static u64 setup_user_stack(struct address_space *as, int argc, char **argv,
     INIT_LIST_HEAD(&stack_vma->list);
 
     vma_insert(as, stack_vma);
+
+    if (argv) {
+        while (argc < (int)(sizeof(arg_addrs) / sizeof(arg_addrs[0])) &&
+               argv[argc]) {
+            size_t len = strlen(argv[argc]) + 1;
+
+            sp -= len;
+            if (write_user_bytes(as, sp, argv[argc], len) < 0) {
+                return 0;
+            }
+
+            arg_addrs[argc] = sp;
+            argc++;
+        }
+    }
+
+    sp &= ~0x7ULL;
+
+    if (push_u64(as, &sp, 0) < 0) {
+        return 0;
+    }
+
+    for (int i = argc - 1; i >= 0; i--) {
+        if (push_u64(as, &sp, arg_addrs[i]) < 0) {
+            return 0;
+        }
+    }
+
+    if (push_u64(as, &sp, (u64)argc) < 0) {
+        return 0;
+    }
 
     return sp;
 }
@@ -246,6 +334,7 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
 {
     struct process *proc;
     struct thread *main_thread;
+    const char *default_argv[] = { name ? name : "init", NULL };
 
     /* Validate ELF header */
     if (elf_size < sizeof(Elf64_Ehdr)) {
@@ -281,7 +370,7 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
 
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdrs[i].p_type == PT_LOAD) {
-            if (load_segment(proc->mm, elf_data, &phdrs[i]) < 0) {
+            if (load_segment(proc->mm, elf_data, elf_size, &phdrs[i]) < 0) {
                 kprintf("exec_elf: Failed to load segment %d\n", i);
                 goto fail;
             }
@@ -289,7 +378,7 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
     }
 
     /* Set up user stack */
-    u64 user_sp = setup_user_stack(proc->mm, 0, NULL, NULL);
+    u64 user_sp = setup_user_stack(proc->mm, default_argv);
     if (user_sp == 0) {
         kprintf("exec_elf: Failed to set up stack\n");
         goto fail;
@@ -323,7 +412,13 @@ fail:
  */
 pid_t exec_init(const void *elf_data, size_t elf_size)
 {
-    return exec_elf(elf_data, elf_size, "init");
+    pid_t pid = exec_elf(elf_data, elf_size, "init");
+
+    if (pid > 0) {
+        init_process = process_find(pid);
+    }
+
+    return pid;
 }
 
 /*
@@ -448,25 +543,28 @@ void exec_test_user_mode(void)
     paging_map(proc->mm->pml4, code_vaddr, code_phys, code_flags);
 
     /* Set up stack */
-    u64 user_sp = setup_user_stack(proc->mm, 0, NULL, NULL);
-    if (user_sp == 0) {
-        kprintf("Failed to set up stack\n");
-        process_destroy(proc);
-        return;
+    {
+        const char *default_argv[] = { "test", NULL };
+        u64 user_sp = setup_user_stack(proc->mm, default_argv);
+        if (user_sp == 0) {
+            kprintf("Failed to set up stack\n");
+            process_destroy(proc);
+            return;
+        }
+
+        kprintf("Test process: PID=%d, entry=0x%llx, stack=0x%llx\n",
+                proc->pid, code_vaddr, user_sp);
+
+        /* Switch to the new address space */
+        paging_switch(proc->mm);
+        kprintf("Switched to user address space\n");
+
+        /* Enter user mode!
+         * This won't return - the process will call sys_exit */
+        kprintf("Entering user mode...\n\n");
+
+        enter_usermode(code_vaddr, user_sp, 0x202);
     }
-
-    kprintf("Test process: PID=%d, entry=0x%llx, stack=0x%llx\n",
-            proc->pid, code_vaddr, user_sp);
-
-    /* Switch to the new address space */
-    paging_switch(proc->mm);
-    kprintf("Switched to user address space\n");
-
-    /* Enter user mode!
-     * This won't return - the process will call sys_exit */
-    kprintf("Entering user mode...\n\n");
-
-    enter_usermode(code_vaddr, user_sp, 0x202);
 
     /* Should never reach here */
     kprintf("ERROR: Returned from user mode!\n");
@@ -479,7 +577,8 @@ void exec_test_user_mode(void)
  * process's address space with a new program and enters user mode.
  * This function does not return on success.
  */
-int exec_replace(const void *elf_data, size_t elf_size, const char *name)
+int exec_replace(const void *elf_data, size_t elf_size, const char *name,
+                 const char *const argv[])
 {
     struct address_space *new_mm;
     struct address_space *old_mm;
@@ -538,7 +637,7 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name)
 
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdrs[i].p_type == PT_LOAD) {
-            if (load_segment(new_mm, elf_data, &phdrs[i]) < 0) {
+            if (load_segment(new_mm, elf_data, elf_size, &phdrs[i]) < 0) {
                 kprintf("exec: Failed to load segment %d\n", i);
                 vmm_destroy_address_space(new_mm);
                 return -1;
@@ -547,7 +646,7 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name)
     }
 
     /* Set up user stack */
-    u64 user_sp = setup_user_stack(new_mm, 0, NULL, NULL);
+    u64 user_sp = setup_user_stack(new_mm, argv);
     if (user_sp == 0) {
         kprintf("exec: Failed to set up stack\n");
         vmm_destroy_address_space(new_mm);
@@ -569,7 +668,9 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name)
 
     /* Switch to new address space and enter user mode */
     paging_switch(new_mm);
-    (void)old_mm;  /* TODO: destroy after switching off the old mappings */
+    if (old_mm) {
+        vmm_destroy_address_space(old_mm);
+    }
     enter_usermode_from_syscall(ehdr->e_entry, user_sp, 0x202);
 
     /* Should never reach here */

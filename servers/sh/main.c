@@ -390,7 +390,7 @@ static void exec_external(void)
     }
 
     if (pid == 0) {
-        exec(path, argv, NULL);
+        execv(path, argv);
         /* If exec returns, it failed */
         printf("%s: exec failed\n", argv[0]);
         _exit(1);

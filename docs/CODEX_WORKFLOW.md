@@ -33,6 +33,7 @@ This document describes a conservative, repeatable workflow for continuing Ocean
 - Default to no build or QEMU runs unless asked.
 - Run `make` when explicitly requested or when the change is large and the user approves.
 - Use `make static-check` as the first portable verification pass when `clang` and `nasm` are available, especially if the cross-toolchain or ISO tooling is missing.
+- When shell startup, exec, or other boot-module UX changes are in scope and QEMU is available, follow `make smoke` with `make shell-smoke`.
 
 **Summarize**
 - Describe what changed and why.
@@ -75,4 +76,5 @@ Boot module changes
 - If the toolchain is missing, report the exact missing component and reference `tools/setup-toolchain.sh`.
 - If QEMU or xorriso is missing, explain the limitation and continue with code changes.
 - If `x86_64-elf-gcc` or ISO tooling is missing but `clang` and `nasm` are present, run `make static-check` and report deeper runtime validation as blocked.
+- If `make shell-smoke` fails, capture the serial log and say whether the break is in boot, init, shell handoff, or command execution.
 - If a change cannot be verified locally, document the gap and a suggested command for the user to run.

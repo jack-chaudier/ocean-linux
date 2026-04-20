@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <ocean/syscall.h>
 
 /* POSIX-like types */
 typedef long ssize_t;
@@ -19,18 +20,6 @@ typedef int pid_t;
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
-/* I/O functions */
-ssize_t read(int fd, void *buf, size_t count);
-ssize_t write(int fd, const void *buf, size_t count);
-
-/* Process functions */
-pid_t fork(void);
-pid_t getpid(void);
-pid_t getppid(void);
-int execve(const char *pathname, char *const argv[], char *const envp[]);
-void _exit(int status) __attribute__((noreturn));
-
-/* Misc */
-int usleep(unsigned int usec);
+/* The actual syscall wrappers live in <ocean/syscall.h>. */
 
 #endif /* _UNISTD_H */

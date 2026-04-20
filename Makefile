@@ -304,6 +304,11 @@ smoke: $(ISO)
 	@echo "Running QEMU smoke checks..."
 	@./scripts/qemu_smoke.sh
 
+.PHONY: shell-smoke
+shell-smoke: $(ISO)
+	@echo "Running QEMU shell smoke checks..."
+	@./scripts/qemu_shell_smoke.sh
+
 .PHONY: stress
 stress: $(ISO)
 	@echo "Running QEMU stress checks..."

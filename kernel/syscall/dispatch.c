@@ -37,6 +37,9 @@ static struct percpu_syscall percpu_data __aligned(16);
 
 static struct cached_module *find_boot_module(const char *name);
 
+#define EXEC_MAX_ARGS       16
+#define EXEC_MAX_ARG_BYTES  512
+
 static const char *path_basename(const char *path)
 {
     const char *slash = strrchr(path, '/');
@@ -473,8 +476,11 @@ static struct cached_module *find_boot_module(const char *name)
 /* SYS_EXEC - Execute a program (replaces current process) */
 static i64 sys_exec(const char *path, char *const argv[], char *const envp[])
 {
-    (void)argv;
     (void)envp;
+    const char *kargv[EXEC_MAX_ARGS + 2];
+    char arg_storage[EXEC_MAX_ARG_BYTES];
+    size_t used = 0;
+    int argc = 0;
 
     if (!path) {
         return -EINVAL;
@@ -503,9 +509,52 @@ static i64 sys_exec(const char *path, char *const argv[], char *const envp[])
         p++;
     }
 
+    if (argv) {
+        for (; argc < EXEC_MAX_ARGS; argc++) {
+            char *user_arg = NULL;
+            int ret = copy_from_user(&user_arg, argv + argc, sizeof(user_arg));
+            if (ret < 0) {
+                return ret;
+            }
+            if (!user_arg) {
+                break;
+            }
+            if (used >= sizeof(arg_storage)) {
+                return -E2BIG;
+            }
+
+            ret = copy_string_from_user(&arg_storage[used],
+                                        sizeof(arg_storage) - used,
+                                        user_arg);
+            if (ret < 0) {
+                return ret;
+            }
+
+            kargv[argc] = &arg_storage[used];
+            used += (size_t)ret + 1;
+        }
+
+        if (argc == EXEC_MAX_ARGS) {
+            char *overflow = NULL;
+            int ret = copy_from_user(&overflow, argv + argc, sizeof(overflow));
+            if (ret < 0) {
+                return ret;
+            }
+            if (overflow) {
+                return -E2BIG;
+            }
+        }
+    }
+
+    if (argc == 0) {
+        kargv[argc++] = name;
+    }
+    kargv[argc] = NULL;
+
     /* Load ELF and replace current process */
-    extern int exec_replace(const void *elf_data, size_t elf_size, const char *name);
-    int rc = exec_replace(mod->address, mod->size, name);
+    extern int exec_replace(const void *elf_data, size_t elf_size,
+                            const char *name, const char *const argv[]);
+    int rc = exec_replace(mod->address, mod->size, name, kargv);
 
     /* exec_replace never returns on success */
     return rc < 0 ? rc : -EIO;
@@ -550,11 +599,15 @@ static i64 sys_ipc_recv_impl(u32 ep_cap, u64 tag_ptr, u64 r1_ptr, u64 r2_ptr, u6
 
     int result = ipc_recv_fast(ep_cap, &tag, regs);
 
-    /* Copy results back to user pointers */
-    if (result == IPC_OK && tag_ptr) {
-        int ret = copy_to_user((void *)tag_ptr, &tag, sizeof(tag));
-        if (ret < 0) {
-            return ret;
+    /* Copy results back to whichever user pointers were provided. */
+    if (result == IPC_OK) {
+        int ret;
+
+        if (tag_ptr) {
+            ret = copy_to_user((void *)tag_ptr, &tag, sizeof(tag));
+            if (ret < 0) {
+                return ret;
+            }
         }
         if (r1_ptr) {
             ret = copy_to_user((void *)r1_ptr, &regs[0], sizeof(regs[0]));

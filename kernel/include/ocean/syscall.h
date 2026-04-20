@@ -12,8 +12,9 @@
 /*
  * System Call Numbers
  *
- * We follow a Linux-like numbering scheme for familiarity,
- * but with a smaller initial set.
+ * Only a small bootstrap subset is implemented today. Reserved numbers are
+ * kept stable so future work does not reshuffle the ABI, but they currently
+ * return -ENOSYS.
  */
 
 /* Process control */
@@ -24,19 +25,21 @@
 #define SYS_GETPID          4
 #define SYS_GETPPID         5
 
-/* Thread control */
+/* Implemented thread control */
 #define SYS_YIELD           10
+
+/* Reserved / unimplemented thread control */
 #define SYS_SLEEP           11
 #define SYS_THREAD_CREATE   12
 #define SYS_THREAD_EXIT     13
 
-/* Memory management */
+/* Reserved / unimplemented memory management */
 #define SYS_BRK             20
 #define SYS_MMAP            21
 #define SYS_MUNMAP          22
 #define SYS_MPROTECT        23
 
-/* File operations (basic) */
+/* Bootstrap file operations: stdin/stdout plus read-only boot modules */
 #define SYS_OPEN            30
 #define SYS_CLOSE           31
 #define SYS_READ            32
@@ -55,22 +58,26 @@
 #define SEEK_CUR            1
 #define SEEK_END            2
 
-/* IPC - Message Passing */
+/* Implemented IPC */
 #define SYS_IPC_SEND        50
 #define SYS_IPC_RECV        51
+
+/* Reserved / unimplemented IPC */
 #define SYS_IPC_CALL        52
 #define SYS_IPC_REPLY       53
 #define SYS_IPC_REPLY_RECV  54
 
-/* IPC - Endpoints and Capabilities */
+/* Implemented endpoint management */
 #define SYS_ENDPOINT_CREATE 60
 #define SYS_ENDPOINT_DESTROY 61
+
+/* Reserved / unimplemented capability management */
 #define SYS_CAP_COPY        62
 #define SYS_CAP_DELETE      63
 #define SYS_CAP_MINT        64
 #define SYS_CAP_REVOKE      65
 
-/* IPC - Notifications */
+/* Reserved / unimplemented notifications */
 #define SYS_NOTIFY_SIGNAL   70
 #define SYS_NOTIFY_WAIT     71
 #define SYS_NOTIFY_POLL     72
