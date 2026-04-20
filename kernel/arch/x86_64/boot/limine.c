@@ -50,6 +50,7 @@ extern void ipc_init(void);
 extern void ipc_dump_stats(void);
 extern void ipc_test(void);
 extern void ipc_test_wke(void);
+extern void ipc_test_call_reply(void);
 extern void ipc_log_window_status(pid_t pid);
 
 /* External symbols from linker script */
@@ -435,6 +436,9 @@ static void kernel_main(void)
 
     /* Exercise the well-known endpoint claim/cleanup path */
     ipc_test_wke();
+
+    /* Exercise real synchronous call/reply between two kthreads */
+    ipc_test_call_reply();
 
     /* Dump scheduler stats */
     sched_dump_stats();

@@ -301,6 +301,29 @@ static inline int64_t ipc_recv(uint32_t ep, uint64_t *tag,
 }
 
 /*
+ * Synchronous call: send a request and block for the reply.
+ *
+ * frame holds the request on entry; on success the kernel overwrites it
+ * with the reply before returning. Returns IPC_OK on success, a negative
+ * IPC error on failure (notably -IPC_ERR_DEAD if the server died before
+ * replying).
+ */
+static inline int64_t ipc_call(uint32_t ep, struct ipc_call_frame *frame)
+{
+    return syscall2(SYS_IPC_CALL, ep, (int64_t)frame);
+}
+
+/*
+ * Reply to the caller of the most recent message we received. Safe to
+ * call with no outstanding caller — returns -IPC_ERR_INVALID in that case.
+ */
+static inline int64_t ipc_reply(uint64_t tag, uint64_t r1, uint64_t r2,
+                                uint64_t r3, uint64_t r4)
+{
+    return syscall5(SYS_IPC_REPLY, tag, r1, r2, r3, r4);
+}
+
+/*
  * Per-process IPC window helpers.
  *
  * The window is a 4 KiB page the kernel maps at OCEAN_IPC_WINDOW_VA for every

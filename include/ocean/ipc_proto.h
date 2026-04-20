@@ -90,6 +90,22 @@ static inline int ipc_slice_valid(uint32_t off, uint32_t len)
 }
 
 /*
+ * Call/reply payload frame.
+ *
+ * Passed by pointer to SYS_IPC_CALL: on entry it holds the request (tag
+ * + four register data words); on return it holds the reply. Keeps the
+ * syscall ABI down to (ep, frame_ptr) so both halves of a call fit in
+ * the x86_64 six-argument register set.
+ */
+struct ipc_call_frame {
+    uint64_t tag;
+    uint64_t r1;
+    uint64_t r2;
+    uint64_t r3;
+    uint64_t r4;
+};
+
+/*
  * Well-known endpoint IDs
  *
  * IDs in [EP_WKE_MIN, EP_WKE_MAX] are reserved for services to claim

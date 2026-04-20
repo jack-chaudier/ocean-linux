@@ -50,6 +50,13 @@ typedef u64 msg_tag_t;
 #define MSG_FLAG_DONATE         (1 << 1)    /* Donate (move) capabilities */
 #define MSG_FLAG_BLOCKING       (1 << 2)    /* Block if partner not ready */
 #define MSG_FLAG_NONBLOCK       (1 << 3)    /* Return immediately if blocked */
+/*
+ * MSG_FLAG_SLICE: regs[0] is a packed (offset, length) slice describing a
+ * region of the sender's IPC window. On send or reply the kernel copies
+ * sender_window[off..off+len] into receiver_window[off..off+len] at the
+ * rendezvous. len == 0 is a no-op; the flag signals intent to copy.
+ */
+#define MSG_FLAG_SLICE          (1 << 4)
 
 /* Helper macros for message tags */
 #define MSG_TAG(label, len, caps, flags) \
@@ -245,6 +252,13 @@ void endpoint_put(struct ipc_endpoint *ep);
 
 /* Tear down every endpoint owned by proc. Called during process teardown. */
 void ipc_destroy_owned_by_process(struct process *proc);
+
+/* Break call/reply links anchored on the given thread. Called from thread
+ * teardown before the struct is freed. Wakes any caller blocked on this
+ * thread with IPC_ERR_DEAD, and clears the caller slot on any server this
+ * thread was waiting on. Safe to call on a thread that has no pending
+ * call/reply state. */
+void ipc_thread_cleanup(struct thread *t);
 
 /*
  * Per-process IPC window management.

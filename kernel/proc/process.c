@@ -566,6 +566,10 @@ void thread_exit(int code)
     /* Mark thread as exiting */
     t->flags |= TF_EXITING;
 
+    /* Break any in-flight call/reply links so a waiting caller wakes with
+     * IPC_ERR_DEAD instead of stalling on a dead server. */
+    ipc_thread_cleanup(t);
+
     /* Remove from process */
     u64 flags;
     spin_lock_irqsave(&proc->lock, &flags);
