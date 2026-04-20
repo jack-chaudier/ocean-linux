@@ -221,3 +221,29 @@ void ipc_test_wke(void)
     kprintf("WKE test passed.\n");
     kprintf("=== WKE Claim Test Done ===\n\n");
 }
+
+/*
+ * Print a line summarising whether the given process got its IPC window
+ * mapped. Called from the boot path right after init exec's in, so we can
+ * tell from a smoke log that the window bringup worked end-to-end.
+ */
+void ipc_log_window_status(pid_t pid)
+{
+    struct process *proc = process_find(pid);
+    if (!proc) {
+        kprintf("[ipc] window status: no process with PID %d\n", pid);
+        return;
+    }
+
+    if (!proc->ipc_window_phys) {
+        kprintf("[ipc] window status: PID %d has NO IPC window\n", pid);
+        return;
+    }
+
+    kprintf("[ipc] window status: PID %d IPC window at user VA 0x%llx, "
+            "phys 0x%llx (size %u)\n",
+            pid,
+            (unsigned long long)OCEAN_IPC_WINDOW_VA,
+            (unsigned long long)proc->ipc_window_phys,
+            (unsigned)OCEAN_IPC_WINDOW_SIZE);
+}

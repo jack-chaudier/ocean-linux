@@ -50,6 +50,7 @@ extern void ipc_init(void);
 extern void ipc_dump_stats(void);
 extern void ipc_test(void);
 extern void ipc_test_wke(void);
+extern void ipc_log_window_status(pid_t pid);
 
 /* External symbols from linker script */
 extern char _bss_start[];
@@ -467,6 +468,10 @@ static void kernel_main(void)
                 break;
             }
         }
+    }
+
+    if (init_pid > 0) {
+        ipc_log_window_status(init_pid);
     }
 
     if (init_pid <= 0) {

@@ -174,6 +174,11 @@ struct process {
     /* IPC endpoints owned by this process (destroyed on exit) */
     struct list_head owned_endpoints;
 
+    /* Physical address of this process's IPC window page, or 0 if none is
+     * mapped. The kernel reaches the window through the HHDM region; user
+     * code reaches it at OCEAN_IPC_WINDOW_VA. */
+    u64 ipc_window_phys;
+
     /* Process name */
     char name[16];                  /* Process name (comm) */
 

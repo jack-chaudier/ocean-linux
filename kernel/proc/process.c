@@ -719,6 +719,11 @@ pid_t process_fork(void)
             process_destroy(child);
             return -1;
         }
+
+        /* vmm_clone_address_space allocated a fresh backing page for the IPC
+         * window VMA, so the child already has its own private window. We
+         * just need to learn the new phys so the kernel can reach it. */
+        process_adopt_ipc_window(child);
     }
 
     /* Create child's main thread as copy of parent thread */

@@ -7,7 +7,9 @@
 #ifndef _OCEAN_USER_SYSCALL_H
 #define _OCEAN_USER_SYSCALL_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <ocean/ipc_proto.h>
 
 /*
  * System Call Numbers
@@ -296,6 +298,34 @@ static inline int64_t ipc_recv(uint32_t ep, uint64_t *tag,
 {
     return syscall6(SYS_IPC_RECV, ep, (int64_t)tag,
                     (int64_t)r1, (int64_t)r2, (int64_t)r3, (int64_t)r4);
+}
+
+/*
+ * Per-process IPC window helpers.
+ *
+ * The window is a 4 KiB page the kernel maps at OCEAN_IPC_WINDOW_VA for every
+ * user process. Protocols use offset+length slices of the window to pass
+ * bulk payloads alongside fast-register messages; the kernel copies the
+ * slice between sender and receiver windows as part of call/reply.
+ */
+static inline void *ipc_window(void)
+{
+    return (void *)OCEAN_IPC_WINDOW_VA;
+}
+
+static inline size_t ipc_window_size(void)
+{
+    return (size_t)OCEAN_IPC_WINDOW_SIZE;
+}
+
+/* Map an (offset, length) slice to a pointer inside this process's window.
+ * Returns NULL if the slice escapes the window. */
+static inline void *ipc_window_slice(uint32_t off, uint32_t len)
+{
+    if (!ipc_slice_valid(off, len)) {
+        return NULL;
+    }
+    return (char *)ipc_window() + off;
 }
 
 #endif /* _OCEAN_USER_SYSCALL_H */

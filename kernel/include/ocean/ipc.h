@@ -246,6 +246,23 @@ void endpoint_put(struct ipc_endpoint *ep);
 /* Tear down every endpoint owned by proc. Called during process teardown. */
 void ipc_destroy_owned_by_process(struct process *proc);
 
+/*
+ * Per-process IPC window management.
+ *
+ * process_setup_ipc_window allocates and maps a fresh 4 KiB page at
+ * OCEAN_IPC_WINDOW_VA for the given process's address space.
+ *
+ * process_adopt_ipc_window records the phys of the window in a process whose
+ * address space was cloned from a parent (fork path); the clone already
+ * allocated the backing page, this just reads its phys back out.
+ *
+ * process_ipc_window_kva returns a kernel-accessible pointer to the window
+ * via the HHDM mapping, or NULL if no window is set up.
+ */
+int process_setup_ipc_window(struct process *proc);
+void process_adopt_ipc_window(struct process *proc);
+void *process_ipc_window_kva(struct process *proc);
+
 /* Core IPC operations */
 int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg);
 int ipc_recv(struct ipc_endpoint *ep, struct ipc_message *msg);

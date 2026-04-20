@@ -5,6 +5,7 @@
  */
 
 #include <ocean/process.h>
+#include <ocean/ipc.h>
 #include <ocean/sched.h>
 #include <ocean/vmm.h>
 #include <ocean/elf.h>
@@ -384,6 +385,13 @@ pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name)
         goto fail;
     }
 
+    /* Map the per-process IPC window so the initial userspace has a valid
+     * window from its very first instruction. */
+    if (process_setup_ipc_window(proc) != 0) {
+        kprintf("exec_elf: Failed to set up IPC window\n");
+        goto fail;
+    }
+
     /* Create main thread */
     main_thread = process_create_main_thread(proc, ehdr->e_entry, user_sp);
     if (!main_thread) {
@@ -655,6 +663,14 @@ int exec_replace(const void *elf_data, size_t elf_size, const char *name,
 
     old_mm = proc->mm;
     proc->mm = new_mm;
+    proc->ipc_window_phys = 0;
+
+    if (process_setup_ipc_window(proc) != 0) {
+        kprintf("exec: Failed to set up IPC window\n");
+        proc->mm = old_mm;
+        vmm_destroy_address_space(new_mm);
+        return -1;
+    }
 
     if (name && *name) {
         size_t len = 0;
