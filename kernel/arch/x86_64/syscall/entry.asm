@@ -94,15 +94,15 @@ syscall_entry_simple:
     mov r9, r15                     ; arg5
     ; arg6 goes on the stack for the 7-argument C call
 
-    ; Align stack and provide space for arg6.
-    sub rsp, 16
+    ; Provide arg6 on the stack and fix alignment before the C call.
+    sub rsp, 8
     mov [rsp], rbx
 
     ; Call the C dispatcher
     call syscall_dispatch
 
     ; Restore stack alignment
-    add rsp, 16
+    add rsp, 8
 
     ; Store return value in the saved RAX slot
     ; RAX slot is at offset [rsp + 14*8] after the general regs

@@ -821,6 +821,10 @@ pid_t process_wait(int *status)
 retry:
     {
         u64 flags;
+        struct process *zombie = NULL;
+        pid_t pid = -1;
+        int exit_code = 0;
+
         spin_lock_irqsave(&proc->lock, &flags);
 
         /* First check if we have any children at all */
@@ -834,37 +838,29 @@ retry:
         list_for_each_entry(child, &proc->children, sibling) {
             if (child->main_thread &&
                 child->main_thread->state == TASK_ZOMBIE) {
-                pid_t pid = child->pid;
-                if (status) {
-                    *status = child->exit_code;
-                }
-
-                /* Remove from children list */
+                zombie = child;
+                pid = child->pid;
+                exit_code = child->exit_code;
                 list_del_init(&child->sibling);
-
-                spin_unlock_irqrestore(&proc->lock, flags);
-
-                process_destroy(child);
-
-                return pid;
+                break;
             }
         }
 
-        spin_unlock_irqrestore(&proc->lock, flags);
-    }
-
-    /*
-     * No zombie children yet. Publish the wait channel while holding proc->lock
-     * so child exit cannot race past us and lose the wakeup.
-     */
-    {
-        u64 flags;
-
-        spin_lock_irqsave(&proc->lock, &flags);
-        if (list_empty(&proc->children)) {
+        if (zombie) {
             spin_unlock_irqrestore(&proc->lock, flags);
-            return -1;
+
+            if (status) {
+                *status = exit_code;
+            }
+
+            process_destroy(zombie);
+            return pid;
         }
+
+        /*
+         * Arm the sleep while still holding proc->lock so a child cannot exit
+         * and miss our wait_channel publication.
+         */
         self->wait_channel = proc;
         self->state = TASK_INTERRUPTIBLE;
         spin_unlock_irqrestore(&proc->lock, flags);
