@@ -49,6 +49,9 @@ extern pid_t exec_elf(const void *elf_data, size_t elf_size, const char *name);
 extern void ipc_init(void);
 extern void ipc_dump_stats(void);
 extern void ipc_test(void);
+extern void ipc_test_wke(void);
+extern void ipc_test_call_reply(void);
+extern void ipc_log_window_status(pid_t pid);
 
 /* External symbols from linker script */
 extern char _bss_start[];
@@ -431,6 +434,12 @@ static void kernel_main(void)
     /* Test IPC between kernel threads */
     ipc_test();
 
+    /* Exercise the well-known endpoint claim/cleanup path */
+    ipc_test_wke();
+
+    /* Exercise real synchronous call/reply between two kthreads */
+    ipc_test_call_reply();
+
     /* Dump scheduler stats */
     sched_dump_stats();
 
@@ -463,6 +472,10 @@ static void kernel_main(void)
                 break;
             }
         }
+    }
+
+    if (init_pid > 0) {
+        ipc_log_window_status(init_pid);
     }
 
     if (init_pid <= 0) {

@@ -49,8 +49,72 @@
 #define IPC_FLAG_ERROR      (1 << 1)    /* Error response */
 
 /*
- * Well-known endpoint IDs
+ * Per-process IPC window.
+ *
+ * Every user process gets one private page mapped read/write at a fixed
+ * user virtual address. Messages that need to carry more than the four
+ * fast-register data words reference a slice of the window as (offset, len),
+ * and the kernel copies the slice from the sender's window into the
+ * receiver's window as part of call/reply.
+ *
+ * The window is a single 4 KiB page today. Messages must fit within that
+ * bound; protocols that need more should chunk their payloads. The layout
+ * inside the window is entirely protocol-defined; the kernel only sees
+ * (offset, len) ranges.
  */
+#define OCEAN_IPC_WINDOW_VA    0x0000700000000000ULL
+#define OCEAN_IPC_WINDOW_SIZE  4096ULL
+
+/*
+ * Compact (offset, length) slice reference. Packs into a single uint64_t so
+ * a slice can ride in one of the fast-register data words alongside other
+ * scalars.
+ */
+typedef struct ipc_slice {
+    uint32_t off;
+    uint32_t len;
+} ipc_slice_t;
+
+#define IPC_SLICE_PACK(off, len) \
+    (((uint64_t)(uint32_t)(off) << 32) | (uint64_t)(uint32_t)(len))
+
+#define IPC_SLICE_OFF(packed)  ((uint32_t)((packed) >> 32))
+#define IPC_SLICE_LEN(packed)  ((uint32_t)(packed))
+
+static inline int ipc_slice_valid(uint32_t off, uint32_t len)
+{
+    if ((uint64_t)off + (uint64_t)len > OCEAN_IPC_WINDOW_SIZE) {
+        return 0;
+    }
+    return 1;
+}
+
+/*
+ * Call/reply payload frame.
+ *
+ * Passed by pointer to SYS_IPC_CALL: on entry it holds the request (tag
+ * + four register data words); on return it holds the reply. Keeps the
+ * syscall ABI down to (ep, frame_ptr) so both halves of a call fit in
+ * the x86_64 six-argument register set.
+ */
+struct ipc_call_frame {
+    uint64_t tag;
+    uint64_t r1;
+    uint64_t r2;
+    uint64_t r3;
+    uint64_t r4;
+};
+
+/*
+ * Well-known endpoint IDs
+ *
+ * IDs in [EP_WKE_MIN, EP_WKE_MAX] are reserved for services to claim
+ * directly via endpoint_create_well_known(). Dynamic endpoint IDs are
+ * allocated above EP_WKE_MAX.
+ */
+#define EP_WKE_MIN      1
+#define EP_WKE_MAX      15
+
 #define EP_INIT         1       /* Init server */
 #define EP_MEM          2       /* Memory server */
 #define EP_PROC         3       /* Process server */

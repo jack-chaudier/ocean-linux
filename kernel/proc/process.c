@@ -6,6 +6,7 @@
 
 #include <ocean/process.h>
 #include <ocean/files.h>
+#include <ocean/ipc.h>
 #include <ocean/sched.h>
 #include <ocean/vmm.h>
 #include <ocean/types.h>
@@ -65,6 +66,11 @@ void process_destroy(struct process *child)
     if (!child) {
         return;
     }
+
+    /* Release owned IPC endpoints before any per-process state disappears so
+     * peers blocked on those endpoints wake with IPC_ERR_DEAD rather than
+     * stalling on a vanished server. */
+    ipc_destroy_owned_by_process(child);
 
     if (child->parent && !list_empty(&child->sibling)) {
         u64 parent_flags;
@@ -247,6 +253,10 @@ struct process *process_create(const char *name)
     /* Initialize children list */
     INIT_LIST_HEAD(&proc->children);
     INIT_LIST_HEAD(&proc->sibling);
+
+    /* Initialize owned-endpoint list so IPC teardown is safe even if the
+     * process never creates any endpoints. */
+    INIT_LIST_HEAD(&proc->owned_endpoints);
 
     /* Initialize process lock */
     spin_init(&proc->lock);
@@ -556,6 +566,10 @@ void thread_exit(int code)
     /* Mark thread as exiting */
     t->flags |= TF_EXITING;
 
+    /* Break any in-flight call/reply links so a waiting caller wakes with
+     * IPC_ERR_DEAD instead of stalling on a dead server. */
+    ipc_thread_cleanup(t);
+
     /* Remove from process */
     u64 flags;
     spin_lock_irqsave(&proc->lock, &flags);
@@ -608,6 +622,11 @@ void process_exit(int code)
     }
 
     proc->exit_code = code;
+
+    /* Tear down IPC endpoints first so any peer blocked in send/recv on our
+     * endpoints wakes with IPC_ERR_DEAD before we release the rest of the
+     * process state. */
+    ipc_destroy_owned_by_process(proc);
 
     /*
      * Reparent children to init so someone can always reap them.
@@ -704,6 +723,11 @@ pid_t process_fork(void)
             process_destroy(child);
             return -1;
         }
+
+        /* vmm_clone_address_space allocated a fresh backing page for the IPC
+         * window VMA, so the child already has its own private window. We
+         * just need to learn the new phys so the kernel can reach it. */
+        process_adopt_ipc_window(child);
     }
 
     /* Create child's main thread as copy of parent thread */

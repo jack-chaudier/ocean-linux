@@ -9,6 +9,7 @@
 #include <ocean/process.h>
 #include <ocean/sched.h>
 #include <ocean/ipc.h>
+#include <ocean/ipc_proto.h>
 #include <ocean/uaccess.h>
 #include <ocean/types.h>
 #include <ocean/defs.h>
@@ -591,6 +592,87 @@ static i64 sys_ipc_send_impl(u32 ep_cap, u64 tag, u64 r1, u64 r2, u64 r3, u64 r4
     return (i64)result;
 }
 
+/*
+ * Build a kernel-side ipc_message from the 6 syscall arguments used by
+ * send/call: (ep, tag, r1..r4). The extra fast-register slots above r4 are
+ * zeroed so stale data does not leak across the rendezvous.
+ */
+static void build_ipc_message(struct ipc_message *msg, u64 tag,
+                              u64 r1, u64 r2, u64 r3, u64 r4)
+{
+    msg->tag = tag;
+    msg->regs[0] = r1;
+    msg->regs[1] = r2;
+    msg->regs[2] = r3;
+    msg->regs[3] = r4;
+    for (int i = 4; i < IPC_FAST_REGS; i++) {
+        msg->regs[i] = 0;
+    }
+    msg->buffer = NULL;
+    msg->buffer_len = 0;
+    msg->nr_caps = 0;
+}
+
+/*
+ * SYS_IPC_CALL - send a request and block for the reply.
+ *
+ * Takes (ep_cap, frame_ptr) where frame_ptr points at a struct
+ * ipc_call_frame holding the request on entry. On success the kernel
+ * overwrites the frame with the reply before returning. When
+ * MSG_FLAG_SLICE is set, r1 is a packed (offset, length) referring to
+ * the caller's IPC window; the kernel copies the slice into the server's
+ * window at the same offset as part of the rendezvous.
+ */
+static i64 sys_ipc_call_impl(u32 ep_cap, u64 frame_ptr)
+{
+    if (!frame_ptr) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_call_frame frame;
+    if (copy_from_user(&frame, (const void *)frame_ptr, sizeof(frame)) < 0) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_endpoint *ep = endpoint_get(ep_cap);
+    if (!ep) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_message msg;
+    build_ipc_message(&msg, frame.tag, frame.r1, frame.r2, frame.r3, frame.r4);
+
+    int result = ipc_call(ep, &msg);
+    endpoint_put(ep);
+
+    if (result == IPC_OK) {
+        frame.tag = msg.tag;
+        frame.r1 = msg.regs[0];
+        frame.r2 = msg.regs[1];
+        frame.r3 = msg.regs[2];
+        frame.r4 = msg.regs[3];
+        if (copy_to_user((void *)frame_ptr, &frame, sizeof(frame)) < 0) {
+            return -IPC_ERR_INVALID;
+        }
+    }
+
+    return (i64)result;
+}
+
+/*
+ * SYS_IPC_REPLY - reply to the caller of the most-recent call we received.
+ *
+ * No endpoint argument: the kernel tracks the caller on our thread. Safe
+ * to call when we do not owe a reply — returns -IPC_ERR_INVALID.
+ */
+static i64 sys_ipc_reply_impl(u64 tag, u64 r1, u64 r2, u64 r3, u64 r4)
+{
+    struct ipc_message msg;
+    build_ipc_message(&msg, tag, r1, r2, r3, r4);
+    int result = ipc_reply(&msg);
+    return (i64)result;
+}
+
 /* SYS_IPC_RECV - Receive a message from an endpoint */
 static i64 sys_ipc_recv_impl(u32 ep_cap, u64 tag_ptr, u64 r1_ptr, u64 r2_ptr, u64 r3_ptr, u64 r4_ptr)
 {
@@ -641,6 +723,28 @@ static i64 sys_endpoint_create_impl(u32 flags)
     struct ipc_endpoint *ep = endpoint_create(proc, flags);
     if (!ep) {
         return -IPC_ERR_INVALID;
+    }
+
+    return (i64)ep->id;
+}
+
+/* SYS_ENDPOINT_CREATE_WKE - Claim a reserved well-known endpoint ID */
+static i64 sys_endpoint_create_wke_impl(u32 id, u32 flags)
+{
+    struct process *proc = get_current_process();
+    if (!proc) {
+        return -IPC_ERR_INVALID;
+    }
+
+    if (id < EP_WKE_MIN || id > EP_WKE_MAX) {
+        return -IPC_ERR_INVALID;
+    }
+
+    struct ipc_endpoint *ep = endpoint_create_well_known(proc, id, flags);
+    if (!ep) {
+        /* Either OOM or id already taken; the userspace convention is that
+         * -IPC_ERR_BUSY signals a contested well-known slot. */
+        return -IPC_ERR_BUSY;
     }
 
     return (i64)ep->id;
@@ -799,6 +903,30 @@ static i64 sys_ipc_recv_dispatch(u64 ep_cap, u64 tag_ptr, u64 r1_ptr,
     return sys_ipc_recv_impl((u32)ep_cap, tag_ptr, r1_ptr, r2_ptr, r3_ptr, r4_ptr);
 }
 
+static i64 sys_ipc_call_dispatch(u64 ep_cap, u64 frame_ptr, u64 arg3,
+                                 u64 arg4, u64 arg5, u64 arg6)
+{
+    (void)arg3; (void)arg4; (void)arg5; (void)arg6;
+    return sys_ipc_call_impl((u32)ep_cap, frame_ptr);
+}
+
+static i64 sys_ipc_reply_dispatch(u64 tag, u64 r1, u64 r2,
+                                  u64 r3, u64 r4, u64 arg6)
+{
+    (void)arg6;
+    return sys_ipc_reply_impl(tag, r1, r2, r3, r4);
+}
+
+static i64 sys_endpoint_create_wke_dispatch(u64 id, u64 flags, u64 arg3,
+                                            u64 arg4, u64 arg5, u64 arg6)
+{
+    (void)arg3;
+    (void)arg4;
+    (void)arg5;
+    (void)arg6;
+    return sys_endpoint_create_wke_impl((u32)id, (u32)flags);
+}
+
 static i64 sys_endpoint_create_dispatch(u64 flags, u64 arg2, u64 arg3,
                                         u64 arg4, u64 arg5, u64 arg6)
 {
@@ -856,10 +984,13 @@ static syscall_handler_t syscall_table[NR_SYSCALLS] = {
     /* IPC - Message passing */
     [SYS_IPC_SEND]      = sys_ipc_send_dispatch,
     [SYS_IPC_RECV]      = sys_ipc_recv_dispatch,
+    [SYS_IPC_CALL]      = sys_ipc_call_dispatch,
+    [SYS_IPC_REPLY]     = sys_ipc_reply_dispatch,
 
     /* IPC - Endpoints */
     [SYS_ENDPOINT_CREATE] = sys_endpoint_create_dispatch,
     [SYS_ENDPOINT_DESTROY] = sys_endpoint_destroy_dispatch,
+    [SYS_ENDPOINT_CREATE_WKE] = sys_endpoint_create_wke_dispatch,
 
     /* Debug */
     [SYS_DEBUG_PRINT]   = sys_debug_print_dispatch,

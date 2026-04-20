@@ -7,7 +7,9 @@
 #ifndef _OCEAN_USER_SYSCALL_H
 #define _OCEAN_USER_SYSCALL_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <ocean/ipc_proto.h>
 
 /*
  * System Call Numbers
@@ -76,6 +78,9 @@
 #define SYS_CAP_DELETE      63
 #define SYS_CAP_MINT        64
 #define SYS_CAP_REVOKE      65
+
+/* Explicit well-known endpoint claim (id in [EP_WKE_MIN, EP_WKE_MAX]) */
+#define SYS_ENDPOINT_CREATE_WKE 66
 
 /* Reserved / unimplemented notifications */
 #define SYS_NOTIFY_SIGNAL   70
@@ -267,6 +272,16 @@ static inline int endpoint_create(uint32_t flags)
     return (int)syscall1(SYS_ENDPOINT_CREATE, flags);
 }
 
+/*
+ * Claim a reserved well-known endpoint. Returns the endpoint id on success,
+ * or a negative IPC error (in particular -IPC_ERR_BUSY if already claimed).
+ * Id must lie in [EP_WKE_MIN, EP_WKE_MAX].
+ */
+static inline int endpoint_create_well_known(uint32_t id, uint32_t flags)
+{
+    return (int)syscall2(SYS_ENDPOINT_CREATE_WKE, id, flags);
+}
+
 static inline int endpoint_destroy(uint32_t ep_id)
 {
     return (int)syscall1(SYS_ENDPOINT_DESTROY, ep_id);
@@ -283,6 +298,57 @@ static inline int64_t ipc_recv(uint32_t ep, uint64_t *tag,
 {
     return syscall6(SYS_IPC_RECV, ep, (int64_t)tag,
                     (int64_t)r1, (int64_t)r2, (int64_t)r3, (int64_t)r4);
+}
+
+/*
+ * Synchronous call: send a request and block for the reply.
+ *
+ * frame holds the request on entry; on success the kernel overwrites it
+ * with the reply before returning. Returns IPC_OK on success, a negative
+ * IPC error on failure (notably -IPC_ERR_DEAD if the server died before
+ * replying).
+ */
+static inline int64_t ipc_call(uint32_t ep, struct ipc_call_frame *frame)
+{
+    return syscall2(SYS_IPC_CALL, ep, (int64_t)frame);
+}
+
+/*
+ * Reply to the caller of the most recent message we received. Safe to
+ * call with no outstanding caller — returns -IPC_ERR_INVALID in that case.
+ */
+static inline int64_t ipc_reply(uint64_t tag, uint64_t r1, uint64_t r2,
+                                uint64_t r3, uint64_t r4)
+{
+    return syscall5(SYS_IPC_REPLY, tag, r1, r2, r3, r4);
+}
+
+/*
+ * Per-process IPC window helpers.
+ *
+ * The window is a 4 KiB page the kernel maps at OCEAN_IPC_WINDOW_VA for every
+ * user process. Protocols use offset+length slices of the window to pass
+ * bulk payloads alongside fast-register messages; the kernel copies the
+ * slice between sender and receiver windows as part of call/reply.
+ */
+static inline void *ipc_window(void)
+{
+    return (void *)OCEAN_IPC_WINDOW_VA;
+}
+
+static inline size_t ipc_window_size(void)
+{
+    return (size_t)OCEAN_IPC_WINDOW_SIZE;
+}
+
+/* Map an (offset, length) slice to a pointer inside this process's window.
+ * Returns NULL if the slice escapes the window. */
+static inline void *ipc_window_slice(uint32_t off, uint32_t len)
+{
+    if (!ipc_slice_valid(off, len)) {
+        return NULL;
+    }
+    return (char *)ipc_window() + off;
 }
 
 #endif /* _OCEAN_USER_SYSCALL_H */

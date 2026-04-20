@@ -50,6 +50,13 @@ typedef u64 msg_tag_t;
 #define MSG_FLAG_DONATE         (1 << 1)    /* Donate (move) capabilities */
 #define MSG_FLAG_BLOCKING       (1 << 2)    /* Block if partner not ready */
 #define MSG_FLAG_NONBLOCK       (1 << 3)    /* Return immediately if blocked */
+/*
+ * MSG_FLAG_SLICE: regs[0] is a packed (offset, length) slice describing a
+ * region of the sender's IPC window. On send or reply the kernel copies
+ * sender_window[off..off+len] into receiver_window[off..off+len] at the
+ * rendezvous. len == 0 is a no-op; the flag signals intent to copy.
+ */
+#define MSG_FLAG_SLICE          (1 << 4)
 
 /* Helper macros for message tags */
 #define MSG_TAG(label, len, caps, flags) \
@@ -132,6 +139,7 @@ struct ipc_endpoint {
 
     /* List linkage */
     struct list_head list;              /* Global endpoint list */
+    struct list_head owner_link;        /* Link in owner->owned_endpoints */
 };
 
 /* Endpoint flags */
@@ -236,9 +244,38 @@ void ipc_init(void);
 
 /* Endpoint operations */
 struct ipc_endpoint *endpoint_create(struct process *owner, u32 flags);
+struct ipc_endpoint *endpoint_create_well_known(struct process *owner,
+                                                u32 id, u32 flags);
 void endpoint_destroy(struct ipc_endpoint *ep);
 struct ipc_endpoint *endpoint_get(u32 id);
 void endpoint_put(struct ipc_endpoint *ep);
+
+/* Tear down every endpoint owned by proc. Called during process teardown. */
+void ipc_destroy_owned_by_process(struct process *proc);
+
+/* Break call/reply links anchored on the given thread. Called from thread
+ * teardown before the struct is freed. Wakes any caller blocked on this
+ * thread with IPC_ERR_DEAD, and clears the caller slot on any server this
+ * thread was waiting on. Safe to call on a thread that has no pending
+ * call/reply state. */
+void ipc_thread_cleanup(struct thread *t);
+
+/*
+ * Per-process IPC window management.
+ *
+ * process_setup_ipc_window allocates and maps a fresh 4 KiB page at
+ * OCEAN_IPC_WINDOW_VA for the given process's address space.
+ *
+ * process_adopt_ipc_window records the phys of the window in a process whose
+ * address space was cloned from a parent (fork path); the clone already
+ * allocated the backing page, this just reads its phys back out.
+ *
+ * process_ipc_window_kva returns a kernel-accessible pointer to the window
+ * via the HHDM mapping, or NULL if no window is set up.
+ */
+int process_setup_ipc_window(struct process *proc);
+void process_adopt_ipc_window(struct process *proc);
+void *process_ipc_window_kva(struct process *proc);
 
 /* Core IPC operations */
 int ipc_send(struct ipc_endpoint *ep, struct ipc_message *msg);
@@ -280,6 +317,7 @@ i64 sys_ipc_reply(u64 tag, u64 r1, u64 r2, u64 r3, u64 r4);
 i64 sys_ipc_reply_recv(u32 ep_cap, u64 tag, u64 r1, u64 r2, u64 r3, u64 r4);
 
 i64 sys_endpoint_create(u32 flags);
+i64 sys_endpoint_create_well_known(u32 id, u32 flags);
 i64 sys_cap_copy(u32 dst_slot, u32 src_slot);
 i64 sys_cap_delete(u32 slot);
 

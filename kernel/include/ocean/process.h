@@ -11,6 +11,11 @@
 #include <ocean/list.h>
 #include <ocean/spinlock.h>
 
+/* Number of register slots carried by a fast-path IPC message. Must stay
+ * in sync with IPC_FAST_REGS in ocean/ipc.h. Declared here so the thread
+ * struct does not need to pull in the full IPC header. */
+#define PROCESS_IPC_FAST_REGS 8
+
 /* Forward declarations */
 struct address_space;
 struct vm_area;
@@ -132,6 +137,29 @@ struct thread {
     /* CPU affinity */
     int cpu;                        /* Current/last CPU */
     u64 cpu_mask;                   /* Allowed CPUs (bitmask) */
+
+    /*
+     * IPC call/reply state.
+     *
+     * ipc_caller is the thread waiting for us to reply (NULL when we are not
+     * currently handling a call). ipc_reply_server is the thread we are
+     * waiting on for a reply (NULL when we are not the caller of an
+     * in-flight call). Both pointers are mutually maintained under
+     * ipc_cc_lock so that either peer's thread_exit can sever the link
+     * cleanly.
+     *
+     * When we are the waiting caller, ipc_reply_pending, ipc_reply_result,
+     * ipc_reply_tag, and ipc_reply_regs hold the completed reply slots and
+     * the outcome (IPC_OK, IPC_ERR_DEAD, ...). ipc_reply_pending is read in
+     * the wait loop with a volatile qualifier so the compiler cannot hoist
+     * the load.
+     */
+    struct thread *ipc_caller;
+    struct thread *ipc_reply_server;
+    volatile int   ipc_reply_pending;
+    int            ipc_reply_result;
+    u64            ipc_reply_tag;
+    u64            ipc_reply_regs[PROCESS_IPC_FAST_REGS];
 };
 
 /*
@@ -170,6 +198,14 @@ struct process {
 
     /* File descriptors (placeholder for future) */
     void *files;                    /* File descriptor table */
+
+    /* IPC endpoints owned by this process (destroyed on exit) */
+    struct list_head owned_endpoints;
+
+    /* Physical address of this process's IPC window page, or 0 if none is
+     * mapped. The kernel reaches the window through the HHDM region; user
+     * code reaches it at OCEAN_IPC_WINDOW_VA. */
+    u64 ipc_window_phys;
 
     /* Process name */
     char name[16];                  /* Process name (comm) */
